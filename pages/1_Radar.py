@@ -36,7 +36,7 @@ with st.sidebar:
                 st.session_state['news_stream'].insert(0, new_item)
                 
                 # --- 保存数据到硬盘 ---
-                utils.save_data(st.session_state['news_stream'])
+                utils.save_data(st.session_state['news_stream'],"radar_data")
                 # -------------------
                 
                 st.rerun()

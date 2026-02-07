@@ -18,7 +18,7 @@ if 'macro_status' not in st.session_state:
         "fed": "观望",
         "economy": "软着陆",
         "inflation": "粘性",
-        "market": "震荡",   # 原叙事改为大盘状态
+        "market": "震荡",   
         "conclusion": "暂无数据，请运行AI校准..."
     }
 
@@ -177,4 +177,6 @@ for item in st.session_state['macro_stream']:
 st.write("")
 if st.button("🗑️ 清空记录"):
     st.session_state['macro_stream'] = []
+    # 👇👇👇 关键修改：清空的同时，告诉云端数据库也清空
+    utils.save_data(st.session_state['macro_stream'], "macro_stream")
     st.rerun()

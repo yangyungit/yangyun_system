@@ -9,11 +9,12 @@ from datetime import datetime
 st.set_page_config(page_title="情报投喂口", page_icon="⚡️", layout="wide")
 
 # --- 1. 全局数据初始化 ---
+# 必须带 sheet_name 参数
 if 'news_stream' not in st.session_state:
-    st.session_state['news_stream'] = utils.load_data()
+    st.session_state['news_stream'] = utils.load_data(sheet_name="radar_data")
 
 if 'macro_stream' not in st.session_state:
-    st.session_state['macro_stream'] = []
+    st.session_state['macro_stream'] = utils.load_data(sheet_name="macro_stream")
 
 # --- 2. 界面设计 ---
 st.title("⚡️ 全球情报投喂口 (Global Intel Port)")
@@ -75,7 +76,7 @@ with st.container(border=True):
                                 "investigation": None
                             }
                             st.session_state['news_stream'].insert(0, radar_item)
-                            utils.save_data(st.session_state['news_stream'])
+                            utils.save_data(st.session_state['news_stream'], "radar_data")
                             
                             # 反馈卡片
                             st.success("✅ 已归档至【情报雷达】")

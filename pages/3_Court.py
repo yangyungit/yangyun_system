@@ -59,7 +59,7 @@ with st.sidebar:
             if success:
                 current_case['status'] = 'Archived'
                 current_case['verdict'] = decision
-                utils.save_data(st.session_state['news_stream'])
+                utils.save_data(st.session_state['news_stream'],"radar_data")
                 st.balloons()
                 st.success(f"已归档！包含 {len(current_case.get('debate_history', []))} 条辩论记录。")
                 st.rerun()
@@ -80,7 +80,7 @@ if current_case.get('status') == 'Archived':
     st.markdown(f"### 最终裁决\n{current_case.get('verdict')}")
     if st.button("🔄 重新审理"):
         current_case['status'] = 'Active'
-        utils.save_data(st.session_state['news_stream'])
+        utils.save_data(st.session_state['news_stream'],"radar_data")
         st.rerun()
     st.stop()
 
@@ -141,7 +141,7 @@ if 'debate_history' not in current_case or not current_case['debate_history']:
                     "role": "assistant",
                     "content": response.choices[0].message.content
                 })
-                utils.save_data(st.session_state['news_stream'])
+                utils.save_data(st.session_state['news_stream'],"radar_data")
                 st.rerun()
 
 # 2. 聊天记录展示区
@@ -193,4 +193,4 @@ if 'debate_history' in current_case and current_case['debate_history']:
             placeholder.markdown(full_res)
         
         current_case['debate_history'].append({"role": "assistant", "content": full_res})
-        utils.save_data(st.session_state['news_stream'])
+        utils.save_data(st.session_state['news_stream'],"radar_data")

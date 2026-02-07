@@ -110,14 +110,14 @@ with st.sidebar:
                     if not current_case.get('investigation'):
                         current_case['investigation'] = "### 📂 侦查档案初始化\n"
                     current_case['investigation'] += evidence_block
-                    utils.save_data(st.session_state['news_stream'])
+                    utils.save_data(st.session_state['news_stream'],"radar_data")
                     st.toast(f"{ticker} 技术面数据已入库！", icon="📈")
                     st.rerun()
 
     st.divider()
     if st.button("🗑️ 重置侦查"):
         current_case['investigation'] = None
-        utils.save_data(st.session_state['news_stream'])
+        utils.save_data(st.session_state['news_stream'],"radar_data")
         st.rerun()
 
 # --- 主界面 ---
@@ -175,7 +175,7 @@ if not current_case.get('investigation'):
         )
         
         current_case['investigation'] = response.choices[0].message.content
-        utils.save_data(st.session_state['news_stream'])
+        utils.save_data(st.session_state['news_stream'],"radar_data")
         status_box.update(label="✅ 完成", state="complete")
         st.rerun()
 
@@ -205,7 +205,7 @@ else:
                     follow_up_prompt = f"【新指令】{follow_up_query}\n【情报】{search_res}\n请补充侦查笔记。"
                     res = client.chat.completions.create(model="deepseek-chat", messages=[{"role": "user", "content": follow_up_prompt}])
                     current_case['investigation'] += f"\n\n#### 🕵️ 补充侦查: {follow_up_query}\n{res.choices[0].message.content}"
-                    utils.save_data(st.session_state['news_stream'])
+                    utils.save_data(st.session_state['news_stream'],"radar_data")
                     st.rerun()
     
     with tab2:
