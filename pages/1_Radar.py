@@ -2,12 +2,12 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 import time
+import utils # <--- 记得加这行
 
 st.set_page_config(page_title="情报雷达", page_icon="📡", layout="wide")
 
-# 确保数据已初始化 (防止用户直接刷新此页面报错)
 if 'news_stream' not in st.session_state:
-    st.switch_page("Home.py") # 踢回首页去初始化
+    st.switch_page("Home.py")
 
 st.title("📡 全球情报雷达 (Radar)")
 
@@ -16,7 +16,6 @@ with st.sidebar:
     with st.expander("📝 手动录入情报", expanded=False):
         with st.form("manual_input"):
             new_title = st.text_input("核心情报/观点")
-            # 更新为你想要的标签体系
             new_tags = st.multiselect("标签体系", 
                 ["#大宗商品", "#技术突破", "#宏观", "#美联储", "#情绪", "#泡沫预警", "#共振", "#背离", "#拐点", "#Crypto"])
             new_surprise = st.slider("惊奇度", 1, 5, 3)
@@ -35,6 +34,11 @@ with st.sidebar:
                     "investigation": None
                 }
                 st.session_state['news_stream'].insert(0, new_item)
+                
+                # --- 保存数据到硬盘 ---
+                utils.save_data(st.session_state['news_stream'])
+                # -------------------
+                
                 st.rerun()
 
 # --- 核心大屏 ---
@@ -48,7 +52,6 @@ c3.metric("市场情绪", "贪婪 76", "泡沫预警", delta_color="off")
 
 st.divider()
 
-# 表格配置 (去掉了 Status)
 st.dataframe(
     df[['id', 'time', 'title', 'tags', 'surprise', 'source']],
     column_config={
@@ -65,13 +68,10 @@ st.dataframe(
 
 st.caption("👇 选中下方 ID 启动侦查")
 
-# 交互操作区
 all_ids = df['id'].tolist()
-# 增加一个空选项，防止误触
 selected_case = st.selectbox("🎯 选择案件 ID:", [""] + all_ids)
 
 if selected_case:
-    # 找到对应的标题用于提示
     case_title = df[df['id'] == selected_case]['title'].values[0]
     st.info(f"已选中: {case_title}")
     

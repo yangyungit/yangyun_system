@@ -1,0 +1,29 @@
+[
+    {
+        "id": "NVDA_02",
+        "title": "大摩翻多 NVDA 至 $1600，良率瓶颈突破",
+        "time": "10:30",
+        "tags": [
+            "#技术突破",
+            "#宏观"
+        ],
+        "surprise": 4,
+        "source": "Bloomberg",
+        "summary": "台积电 CoWoS 良率由 40% 升至 80%，Blackwell 发货延迟风险解除。",
+        "investigation": null
+    },
+    {
+        "id": "GOLD_01",
+        "title": "金铜比突破历史高位，衰退信号亮起",
+        "time": "09:45",
+        "tags": [
+            "#大宗商品",
+            "#背离",
+            "#泡沫预警"
+        ],
+        "surprise": 5,
+        "source": "ZeroHedge",
+        "summary": "铜价因需求衰退下跌，金价因避险上涨，两者背离程度达到 2008 年水平。",
+        "investigation": null
+    }
+]

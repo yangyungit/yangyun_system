@@ -1,11 +1,11 @@
 import streamlit as st
 from openai import OpenAI
+import utils # <--- 引入工具箱
 
 st.set_page_config(page_title="认知法庭", page_icon="⚖️", layout="wide")
 
-# --- 配置区 (已安全升级) ---
+# 安全获取 Key
 try:
-    # 尝试从保险柜 (.streamlit/secrets.toml) 拿钥匙
     DEEPSEEK_API_KEY = st.secrets["DEEPSEEK_API_KEY"]
 except FileNotFoundError:
     st.error("密钥未配置！请在 .streamlit/secrets.toml 中配置 DEEPSEEK_API_KEY")
@@ -22,18 +22,15 @@ current_case = next((x for x in st.session_state['news_stream'] if x['id'] == ca
 
 st.title(f"⚖️ 认知法庭: {current_case['title']}")
 
-# 检查证据
 if not current_case.get('investigation'):
     st.error("⛔️ 侦探报告缺失！法官拒绝开庭。请返回 Detective 页面补充调查。")
     st.stop()
 
-# 展示证据
 with st.expander("📂 呈堂证供 (侦探报告)", expanded=False):
     st.markdown(current_case['investigation'])
 
 st.divider()
 
-# 董事会
 st.subheader("🧠 董事会辩论")
 
 selected_personas = st.multiselect(
@@ -54,7 +51,7 @@ if st.button("🔴 开始辩论 (Start Debate)"):
     请模拟 {", ".join(selected_personas)} 之间的对话。
     
     要求：
-    1. **去油腻**：禁止任何动作描写（如“点燃雪茄”），禁止情绪化废话。
+    1. **去油腻**：禁止任何动作描写，禁止情绪化废话。
     2. **硬核**：芒格关注反向思考和护城河；索罗斯关注假象和时机；外星人关注物理第一性；散户关注价格冲动。
     3. **结论**：最后由“主持人”总结胜率和赔率。
     """
@@ -73,9 +70,18 @@ if st.button("🔴 开始辩论 (Start Debate)"):
                 placeholder.markdown(full_text + "▌")
         placeholder.markdown(full_text)
 
-# 最终裁决
 st.divider()
 st.subheader("👨‍⚖️ 最终裁决")
 decision = st.text_area("法官笔记", placeholder="在此输入最终决策逻辑，将存入 Obsidian...")
+
 if st.button("归档决策"):
-    st.success("已保存至知识库！(模拟)")
+    if not decision:
+        st.error("请先写法官笔记！")
+    else:
+        # --- 调用 utils 写入 Obsidian ---
+        success, msg = utils.save_to_obsidian(current_case, decision)
+        if success:
+            st.success(f"✅ 决策已归档至 Obsidian!\n路径: `{msg}`")
+            st.balloons()
+        else:
+            st.error(f"归档失败: {msg}")
