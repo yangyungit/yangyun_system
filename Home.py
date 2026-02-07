@@ -98,7 +98,10 @@ with c1:
     st.markdown("#### 🌍 宏观库 (Latest 3)")
     if st.session_state['macro_stream']:
         for item in st.session_state['macro_stream'][:3]:
-            st.code(f"[{item['time']}] {item['summary']}", language="text")
+            # ✅ 安全写法：用 .get() 防止报错
+            time_str = item.get('time', 'Unknown Time')
+            summary_str = item.get('summary', 'No Summary')
+            st.code(f"[{time_str}] {summary_str}", language="text")
     else:
         st.caption("暂无数据")
 
@@ -106,6 +109,9 @@ with c2:
     st.markdown("#### 📡 雷达库 (Latest 3)")
     if st.session_state['news_stream']:
         for item in st.session_state['news_stream'][:3]:
-            st.code(f"[{item['time']}] {item['title']}", language="text")
+            # ✅ 安全写法
+            time_str = item.get('time', 'Unknown Time')
+            title_str = item.get('title', 'No Title')
+            st.code(f"[{time_str}] {title_str}", language="text")
     else:
         st.caption("暂无数据")
