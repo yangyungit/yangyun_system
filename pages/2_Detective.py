@@ -3,8 +3,14 @@ from openai import OpenAI
 
 st.set_page_config(page_title="侦探工作室", page_icon="🕵️", layout="wide")
 
-# --- 配置区 (以后我们要放入 secrets.toml) ---
-DEEPSEEK_API_KEY = "sk-xxxxxxxxxxxxxxxxxxxxxxxx" # <--- 🔴 记得填 Key !!!
+# --- 配置区 (已安全升级) ---
+try:
+    # 尝试从保险柜 (.streamlit/secrets.toml) 拿钥匙
+    DEEPSEEK_API_KEY = st.secrets["DEEPSEEK_API_KEY"]
+except FileNotFoundError:
+    st.error("密钥未配置！请在 .streamlit/secrets.toml 中配置 DEEPSEEK_API_KEY")
+    st.stop()
+
 BASE_URL = "https://api.deepseek.com"
 
 # 检查数据

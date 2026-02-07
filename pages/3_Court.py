@@ -3,7 +3,14 @@ from openai import OpenAI
 
 st.set_page_config(page_title="认知法庭", page_icon="⚖️", layout="wide")
 
-DEEPSEEK_API_KEY = "sk-xxxxxxxxxxxxxxxxxxxxxxxx" # <--- 🔴 记得填 Key !!!
+# --- 配置区 (已安全升级) ---
+try:
+    # 尝试从保险柜 (.streamlit/secrets.toml) 拿钥匙
+    DEEPSEEK_API_KEY = st.secrets["DEEPSEEK_API_KEY"]
+except FileNotFoundError:
+    st.error("密钥未配置！请在 .streamlit/secrets.toml 中配置 DEEPSEEK_API_KEY")
+    st.stop()
+
 BASE_URL = "https://api.deepseek.com"
 
 if 'current_case_id' not in st.session_state or not st.session_state['current_case_id']:
