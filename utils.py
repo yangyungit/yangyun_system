@@ -8,12 +8,16 @@ import yfinance as yf
 # --- 权限与工具函数 ---
 
 def check_password():
-    if "password_correct" not in st.session_state:
-        st.session_state["password_correct"] = False
-    if not st.session_state["password_correct"]:
-        st.text_input("请输入指挥官口令:", type="password", key="password_input", on_change=password_entered)
-        return False
-    return True
+    # 👇 直接放行，不再检查密码
+    return True 
+    
+    # --- 下面的旧代码可以删掉，也可以留着当纪念 ---
+    # if "password_correct" not in st.session_state:
+    #     st.session_state["password_correct"] = False
+    # if not st.session_state["password_correct"]:
+    #     st.text_input("请输入指挥官口令:", type="password", key="password_input", on_change=password_entered)
+    #     return False
+    # return True
 
 def password_entered():
     if st.session_state["password_input"] == st.secrets["PASSWORD"]:
