@@ -1,9 +1,8 @@
+import streamlit as st
 import utils
 if not utils.check_password():
     st.stop()  # 密码不对，直接停止运行下面的代码
-    
-import streamlit as st
-import utils
+
 from openai import OpenAI
 from datetime import datetime
 
