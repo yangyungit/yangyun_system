@@ -69,3 +69,271 @@ status: Closed
         return True, full_path
     except Exception as e:
         return False, str(e)
+    
+# ... (上面的代码保持不变) ...
+
+# --- 功能 3: 互联网搜索 (V0.6 新增) ---
+from duckduckgo_search import DDGS
+
+def search_web(query, max_results=5):
+    """
+    使用 DuckDuckGo 搜索实时信息
+    """
+    try:
+        results = DDGS().text(query, max_results=max_results)
+        if not results:
+            return "未找到相关网络结果。"
+        
+        # 把结果整理成干净的文本
+        formatted_results = ""
+        for i, res in enumerate(results):
+            formatted_results += f"Source {i+1}: {res['title']}\nURL: {res['href']}\nContent: {res['body']}\n\n"
+            
+        return formatted_results
+    except Exception as e:
+        return f"搜索失败: {str(e)}"
+    
+    # ... (上面的代码保持不变) ...
+
+# ... (保留上面的 imports 和 search_web) ...
+import pandas as pd
+import yfinance as yf
+
+# --- 功能 4 (升级): 增强版金融数据 (含技术面) ---
+def get_stock_analysis(symbol):
+    """
+    获取基本面 + 技术面 (MA, 趋势) 数据
+    """
+    try:
+        # 1. 获取基础信息
+        ticker = yf.Ticker(symbol)
+        info = ticker.info
+        
+        # 2. 获取历史K线 (用于算均线) - 取过去6个月
+        hist = ticker.history(period="6mo") 
+        if hist.empty:
+            return f"无法获取 {symbol} 的K线数据"
+            
+        current_price = info.get('currentPrice', hist['Close'].iloc[-1])
+        
+        # 3. 计算简单技术指标 (Python 自己算，不求人)
+        hist['MA20'] = hist['Close'].rolling(window=20).mean()
+        hist['MA50'] = hist['Close'].rolling(window=50).mean()
+        hist['Vol_MA'] = hist['Volume'].rolling(window=20).mean()
+        
+        last_close = hist['Close'].iloc[-1]
+        ma20 = hist['MA20'].iloc[-1]
+        ma50 = hist['MA50'].iloc[-1]
+        last_vol = hist['Volume'].iloc[-1]
+        avg_vol = hist['Vol_MA'].iloc[-1]
+        
+        # 4. 简单趋势判断逻辑
+        trend = "震荡/不明"
+        if last_close > ma20 > ma50:
+            trend = "🔥 多头排列 (强势)"
+        elif last_close < ma20 < ma50:
+            trend = "❄️ 空头排列 (弱势)"
+            
+        vol_status = "缩量"
+        if last_vol > avg_vol * 1.5:
+            vol_status = "🚨 放量 (注意变盘)"
+        
+        # 5. 组装给 AI 看的报告
+        report = f"""
+【📈 标的深度扫描: {symbol.upper()}】
+---------------------------
+💰 **价格:** {current_price}
+📊 **趋势状态:** {trend}
+🌊 **量能状态:** {vol_status}
+---------------------------
+🛠 **技术面信号:**
+- MA20 (月线): {ma20:.2f}
+- MA50 (季线): {ma50:.2f}
+- 现价/MA20乖离: {((last_close/ma20)-1)*100:.1f}% (正值过大需警惕回调)
+- 52周范围: {info.get('fiftyTwoWeekLow')} - {info.get('fiftyTwoWeekHigh')}
+---------------------------
+P **基本面估值:**
+- 市值: {info.get('marketCap', 'N/A')}
+- PE (TTM): {info.get('trailingPE', 'N/A')}
+- Forward PE: {info.get('forwardPE', 'N/A')}
+- PEG Ratio: {info.get('pegRatio', 'N/A')}
+"""
+        return report
+    except Exception as e:
+        return f"获取 {symbol} 数据失败: {str(e)}"
+
+# --- 功能 5 (新增): 宏观天气预报 ---
+def get_macro_context():
+    """
+    获取关键宏观指标：美债、恐慌指数、美元、黄金
+    """
+    try:
+        # 10年美债(^TNX), VIX(^VIX), 美元指数(DX-Y.NYB), 黄金(GC=F)
+        tickers = ["^TNX", "^VIX", "DX-Y.NYB", "GC=F"] 
+        data = yf.download(tickers, period="5d", progress=False)['Close']
+        
+        # 取最新值 (处理数据格式可能带来的多层索引问题)
+        latest = data.iloc[-1]
+        
+        # 简单解读逻辑
+        tnx = latest['^TNX']
+        vix = latest['^VIX']
+        dxy = latest['DX-Y.NYB']
+        
+        macro_status = "🌪️ 混沌"
+        if vix > 25: macro_status = "⛈️ 极度恐慌 (Risk-Off)"
+        elif tnx > 4.5 and dxy > 105: macro_status = "🧊 紧缩压制 (流动性收紧)"
+        elif tnx < 4.0 and vix < 15: macro_status = "☀️ 温和顺风 (Risk-On)"
+        
+        report = f"""
+🌍 **宏观天气预报 (Macro Context)**
+状态判定: 【{macro_status}】
+---------------------------
+Yield (10Y美债): {tnx:.2f}% (无风险利率锚)
+VIX (恐慌指数): {vix:.2f} (市场情绪温度计)
+DXY (美元指数): {dxy:.2f} (全球资金流向)
+Gold (黄金): ${latest['GC=F']:.0f}
+"""
+        return report
+    except Exception as e:
+        return f"宏观数据暂时离线: {e}"
+    
+# ... (保留上面的代码) ...
+import plotly.graph_objects as go
+
+# --- 功能 6 (V3.0): 宏观数据矩阵 ---
+def get_macro_matrix():
+    """
+    获取多维度的宏观资产数据，用于辅助判断周期
+    """
+    tickers = {
+        "10Y 美债 (无风险利率)": "^TNX",
+        "2Y 美债 (政策利率预期)": "^IRX",
+        "美元指数 (流动性阀门)": "DX-Y.NYB",
+        "VIX (恐慌指数)": "^VIX",
+        "黄金 (避险/通胀)": "GC=F",
+        "原油 (通胀预期)": "CL=F",
+        "比特币 (风险偏好)": "BTC-USD",
+        "标普500 (股市晴雨表)": "^GSPC"
+    }
+    
+    data_snapshot = {}
+    try:
+        # 一次性下载所有数据，取过去 1 年，方便算变化率
+        df = yf.download(list(tickers.values()), period="1y", progress=False)['Close']
+        
+        for name, symbol in tickers.items():
+            if symbol in df.columns:
+                series = df[symbol].dropna()
+                if not series.empty:
+                    current = series.iloc[-1]
+                    prev_week = series.iloc[-5] if len(series) > 5 else current
+                    prev_month = series.iloc[-20] if len(series) > 20 else current
+                    
+                    # 计算变化幅度
+                    chg_w = (current - prev_week) / prev_week * 100
+                    chg_m = (current - prev_month) / prev_month * 100
+                    
+                    data_snapshot[name] = {
+                        "price": current,
+                        "chg_w": chg_w,
+                        "chg_m": chg_m
+                    }
+    except Exception as e:
+        print(f"Macro Data Error: {e}")
+        
+    return data_snapshot
+
+def plot_pendulum(score):
+    """
+    画霍华德·马克斯的钟摆 (Gauge Chart)
+    score: 0 (极度恐惧/萧条) -> 50 (平衡) -> 100 (极度贪婪/泡沫)
+    """
+    fig = go.Figure(go.Indicator(
+        mode = "gauge+number+delta",
+        value = score,
+        domain = {'x': [0, 1], 'y': [0, 1]},
+        title = {'text': "市场钟摆位置 (Market Pendulum)", 'font': {'size': 24}},
+        delta = {'reference': 50, 'increasing': {'color': "red"}, 'decreasing': {'color': "green"}},
+        gauge = {
+            'axis': {'range': [None, 100], 'tickwidth': 1, 'tickcolor': "white"},
+            'bar': {'color': "rgba(0,0,0,0)"}, # 隐藏默认指针，用 steps 颜色
+            'bgcolor': "white",
+            'borderwidth': 2,
+            'bordercolor': "gray",
+            'steps': [
+                {'range': [0, 20], 'color': '#00ff00', 'name': '极度悲观 (买入)'},  # Green
+                {'range': [20, 40], 'color': '#90ee90'},
+                {'range': [40, 60], 'color': '#ffff00', 'name': '平衡'},        # Yellow
+                {'range': [60, 80], 'color': '#ffa500'},
+                {'range': [80, 100], 'color': '#ff0000', 'name': '极度贪婪 (卖出)'} # Red
+            ],
+            'threshold': {
+                'line': {'color': "black", 'width': 4},
+                'thickness': 0.75,
+                'value': score
+            }
+        }
+    ))
+    fig.update_layout(height=300, margin=dict(l=20, r=20, t=50, b=20))
+    return fig
+
+# --- 功能 7: AI 智能分发员 (The Dispatcher) ---
+def auto_dispatch(client, raw_text):
+    """
+    分析输入文本，判断属于【宏观】还是【微观情报】，并自动存入对应的数据库。
+    """
+    prompt = f"""
+    任务：你是一个金融情报分发员。请分析以下文本，将其分类。
+    
+    【文本内容】：{raw_text}
+    
+    【分类标准】：
+    1. **MACRO (宏观)**: 涉及央行政策(美联储)、通胀数据(CPI/PCE)、地缘政治、大宗商品周期、国债利率、汇率、全球经济增长。
+    2. **RADAR (微观/情报)**: 涉及具体公司(NVDA/Tesla)、具体行业(AI/SaaS)、个股财报、产品发布、具体的并购消息。
+    
+    请输出 JSON 格式：
+    {{
+        "category": "MACRO" 或 "RADAR",
+        "summary": "一句话提炼核心 (50字以内)",
+        "tags": ["#标签1", "#标签2"],
+        "bias": "利多" 或 "利空" 或 "中性"
+    }}
+    """
+    
+    try:
+        # 1. AI 判别
+        res = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"}
+        )
+        result = json.loads(res.choices[0].message.content)
+        
+        # 2. 自动存入数据库 (Session State)
+        # 注意：这里需要 st.session_state 已经初始化。实际调用时在页面里操作更安全。
+        return result
+    
+    except Exception as e:
+        return {"error": str(e)}
+    
+# utils.py
+
+import streamlit as st
+
+def check_password():
+    """如果不输入正确密码，就停止渲染后续内容"""
+    if "password_correct" not in st.session_state:
+        st.session_state["password_correct"] = False
+
+    if not st.session_state["password_correct"]:
+        st.text_input("请输入指挥官口令:", type="password", key="password_input", on_change=password_entered)
+        return False
+    return True
+
+def password_entered():
+    # 在 secrets 里设置一个 PASSWORD = "你的密码"
+    if st.session_state["password_input"] == st.secrets["PASSWORD"]:
+        st.session_state["password_correct"] = True
+    else:
+        st.error("口令错误，拒绝访问。")

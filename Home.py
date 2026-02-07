@@ -1,64 +1,111 @@
-import streamlit as st
-import utils  # <--- 核心：引入我们刚才建的工具箱
-
-st.set_page_config(
-    page_title="养云资产·投研中台",
-    page_icon="🏯",
-    layout="wide"
-)
-
-# --- 核心：全局数据初始化 ---
-# 无论你从哪个页面进入，这段代码都会确保数据不会丢失
-if 'news_stream' not in st.session_state:
-    # 1. 尝试从本地 JSON 文件加载数据
-    local_data = utils.load_data()
+import utils
+if not utils.check_password():
+    st.stop()  # 密码不对，直接停止运行下面的代码
     
-    if local_data:
-        # 如果本地有存档，直接读取存档
-        st.session_state['news_stream'] = local_data
-        st.toast("已加载本地历史数据", icon="📂")
+import streamlit as st
+import utils
+from openai import OpenAI
+from datetime import datetime
+
+st.set_page_config(page_title="情报投喂口", page_icon="⚡️", layout="wide")
+
+# --- 1. 全局数据初始化 ---
+if 'news_stream' not in st.session_state:
+    st.session_state['news_stream'] = utils.load_data()
+
+if 'macro_stream' not in st.session_state:
+    st.session_state['macro_stream'] = []
+
+# --- 2. 界面设计 ---
+st.title("⚡️ 全球情报投喂口 (Global Intel Port)")
+st.caption("🚀 工作流：在 Gemini/ChatGPT 思考 -> 将精华结论粘贴至此 -> 系统自动分发归档")
+
+# --- 3. 核心投喂区 ---
+with st.container(border=True):
+    st.markdown("### 📥 粘贴情报/观点")
+    
+    # 巨大的输入框
+    with st.form("injection_form", clear_on_submit=True):
+        raw_text = st.text_area(
+            "在此粘贴任何内容 (宏观分析、个股研报、突发新闻...)", 
+            height=300, 
+            placeholder="例如：\n1. 刚才 Gemini 说现在的通胀结构很像 70 年代...\n2. 或者是粘贴一段 NVDA 的财报摘要..."
+        )
+        
+        col_submit, col_source = st.columns([1, 4])
+        with col_submit:
+            submitted = st.form_submit_button("🚀 立即分发", type="primary")
+        
+        if submitted and raw_text:
+            try:
+                # 获取 Key
+                api_key = st.secrets["DEEPSEEK_API_KEY"]
+                client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+                
+                with st.spinner("🧠 正在识别情报属性 (Macro vs Radar)..."):
+                    # 调用分发器
+                    data = utils.auto_dispatch(client, raw_text)
+                    
+                    if "error" in data:
+                        st.error("分发失败，请重试")
+                    else:
+                        data['time'] = datetime.now().strftime("%m-%d %H:%M")
+                        
+                        # === 分支 A: 宏观情报 ===
+                        if data['category'] == 'MACRO':
+                            st.session_state['macro_stream'].insert(0, data)
+                            
+                            # 反馈卡片
+                            st.success("✅ 已归档至【宏观作战室】")
+                            st.markdown(f"""
+                            **摘要:** {data['summary']}  
+                            **标签:** `{data['tags']}`  
+                            **偏向:** {data['bias']}
+                            """)
+                        
+                        # === 分支 B: 微观/雷达情报 ===
+                        elif data['category'] == 'RADAR':
+                            radar_item = {
+                                "id": f"EXT/{int(datetime.now().timestamp())}",
+                                "title": data['summary'],
+                                "time": data['time'],
+                                "tags": data['tags'],
+                                "surprise": 3, # 默认为中等惊奇
+                                "source": "External Intel", # 标记来源
+                                "summary": raw_text, # 保留你粘贴的全文
+                                "investigation": None
+                            }
+                            st.session_state['news_stream'].insert(0, radar_item)
+                            utils.save_data(st.session_state['news_stream'])
+                            
+                            # 反馈卡片
+                            st.success("✅ 已归档至【情报雷达】")
+                            st.markdown(f"""
+                            **标的:** {data['summary']}  
+                            **标签:** `{data['tags']}`
+                            """)
+                            
+            except Exception as e:
+                st.error(f"处理错误: {e}")
+
+# --- 4. 最近入库记录 (Recent Logs) ---
+st.divider()
+st.subheader("🗄️ 最近入库记录")
+
+c1, c2 = st.columns(2)
+
+with c1:
+    st.markdown("#### 🌍 宏观库 (Latest 3)")
+    if st.session_state['macro_stream']:
+        for item in st.session_state['macro_stream'][:3]:
+            st.code(f"[{item['time']}] {item['summary']}", language="text")
     else:
-        # 2. 如果是第一次运行（本地没文件），初始化默认数据
-        st.session_state['news_stream'] = [
-            {
-                "id": "NVDA_02", 
-                "title": "大摩翻多 NVDA 至 $1600，良率瓶颈突破", 
-                "time": "10:30", 
-                "tags": ["#技术突破", "#宏观"], 
-                "surprise": 4, 
-                "source": "Bloomberg", 
-                "summary": "台积电 CoWoS 良率由 40% 升至 80%，Blackwell 发货延迟风险解除。",
-                "investigation": None
-            },
-            {
-                "id": "GOLD_01", 
-                "title": "金铜比突破历史高位，衰退信号亮起", 
-                "time": "09:45", 
-                "tags": ["#大宗商品", "#背离", "#泡沫预警"], 
-                "surprise": 5, 
-                "source": "ZeroHedge", 
-                "summary": "铜价因需求衰退下跌，金价因避险上涨，两者背离程度达到 2008 年水平。",
-                "investigation": None
-            }
-        ]
-        # 马上保存一次，生成 json 文件
-        utils.save_data(st.session_state['news_stream'])
+        st.caption("暂无数据")
 
-if 'current_case_id' not in st.session_state:
-    st.session_state['current_case_id'] = None
-
-# --- 首页 UI ---
-st.title("🏯 养云资产·智能投研系统")
-st.markdown("""
-### 👋 欢迎回来，指挥官。
-
-系统运行状态：**🟢 Online** (已连接本地数据库)
-
-请从左侧侧边栏选择工作流：
-1. **📡 Radar**: 全球情报监控与去噪
-2. **🕵️ Detective**: AI 深度侦查与验证
-3. **⚖️ Court**: 认知法庭与决策归档
-
----
-*Powered by DeepSeek-V3 & Streamlit*
-""")
+with c2:
+    st.markdown("#### 📡 雷达库 (Latest 3)")
+    if st.session_state['news_stream']:
+        for item in st.session_state['news_stream'][:3]:
+            st.code(f"[{item['time']}] {item['title']}", language="text")
+    else:
+        st.caption("暂无数据")

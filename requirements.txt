@@ -1,0 +1,6 @@
+streamlit
+openai
+pandas
+yfinance
+plotly
+# 其他你可能用到的库
