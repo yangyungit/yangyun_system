@@ -2,140 +2,206 @@ import streamlit as st
 import gspread
 import pandas as pd
 import json
-from duckduckgo_search import DDGS
-import yfinance as yf
+import os
+import base64
+import toml
+import google.generativeai as genai
+from datetime import datetime
+import urllib.parse
+from github import Github
 
-# --- 权限与工具函数 ---
+# --- 1. 基础配置 ---
+def ensure_secrets_file():
+    secret_path = ".streamlit/secrets.toml"
+    encoded = os.environ.get("STREAMLIT_SECRETS_B64")
+    if encoded and not os.path.exists(secret_path):
+        try:
+            decoded = base64.b64decode(encoded.strip()).decode()
+            os.makedirs(".streamlit", exist_ok=True)
+            with open(secret_path, "w") as f: f.write(decoded)
+        except: pass
 
-def check_password():
-    # 👇 直接放行，不再检查密码
-    return True 
-    
-    # --- 下面的旧代码可以删掉，也可以留着当纪念 ---
-    # if "password_correct" not in st.session_state:
-    #     st.session_state["password_correct"] = False
-    # if not st.session_state["password_correct"]:
-    #     st.text_input("请输入指挥官口令:", type="password", key="password_input", on_change=password_entered)
-    #     return False
-    # return True
+ensure_secrets_file()
 
-def password_entered():
-    if st.session_state["password_input"] == st.secrets["PASSWORD"]:
-        st.session_state["password_correct"] = True
-    else:
-        st.error("口令错误")
+def get_config(key_name):
+    # 优先从环境变量取 (Fly.io secrets)，其次从本地文件取
+    val = os.environ.get(key_name)
+    if val: return val
+    if os.path.exists(".streamlit/secrets.toml"):
+        try:
+            with open(".streamlit/secrets.toml", "r") as f:
+                return toml.load(f).get(key_name)
+        except: pass
+    return None
 
-# --- 核心：Google Sheets 连接器 ---
+def inject_custom_css():
+    st.markdown("""
+    <style>
+        div[data-testid="stMarkdownContainer"] a {
+            color: inherit !important;
+            text-decoration: none !important;
+            border-bottom: 1px dashed #666;
+            transition: all 0.2s;
+        }
+        div[data-testid="stMarkdownContainer"] a:hover {
+            color: #ffffff !important;
+            text-decoration: underline !important;
+            border-bottom: none;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+
+# --- 2. Google Sheets ---
 def get_gsheet_client():
+    secret_file = ".streamlit/secrets.toml"
     try:
-        credentials = st.secrets["gcp_service_account"]
-        gc = gspread.service_account_from_dict(credentials)
-        return gc
-    except Exception as e:
-        print(f"密钥配置错误: {e}")
-        return None
+        scopes = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
+        with open(secret_file, "r") as f:
+            data = toml.load(f)
+        creds = data.get("gcp_service_account") or data
+        return gspread.service_account_from_dict(creds, scopes=scopes)
+    except: return None
 
-def load_data(sheet_name="radar_data"):
-    """从 Google Sheets 加载数据"""
+def load_data(sheet_name):
     try:
         gc = get_gsheet_client()
-        if not gc: return []
-        
         sh = gc.open("yangyun_system_db")
-        worksheet = sh.worksheet(sheet_name)
-        records = worksheet.get_all_records()
-        
-        if not records: return []
-            
-        for r in records:
-            if 'tags' in r and isinstance(r['tags'], str):
-                try:
-                    r['tags'] = json.loads(r['tags'].replace("'", '"'))
-                except:
-                    r['tags'] = []
-        return records
-    except Exception as e:
-        print(f"加载 {sheet_name} 提示: {e}")
-        return []
+        return sh.worksheet(sheet_name).get_all_records()
+    except: return []
 
-def save_data(data, sheet_name="radar_data"):
-    """保存数据到 Google Sheets"""
+def save_data(data, sheet_name):
     try:
         gc = get_gsheet_client()
         sh = gc.open("yangyun_system_db")
         worksheet = sh.worksheet(sheet_name)
-        
         worksheet.clear()
-        
         if not data: return
-            
-        df = pd.DataFrame(data)
+        df = pd.DataFrame(data).fillna("")
         for col in df.columns:
             df[col] = df[col].apply(lambda x: json.dumps(x, ensure_ascii=False) if isinstance(x, (list, dict)) else x)
-            
         worksheet.update([df.columns.values.tolist()] + df.values.tolist())
+        return True
     except Exception as e:
-        st.error(f"云端保存失败: {e}")
+        raise Exception(f"GS写入失败: {e}")
 
-# --- 搜索与分析 ---
-
-def search_web(query, max_results=3):
+# --- 3. GitHub 归档 (增强版) ---
+def push_to_github(filename, content, folder):
+    token = get_config("GITHUB_TOKEN")
+    if not token: 
+        print(f"⚠️ 缺少 GITHUB_TOKEN，无法推送 {filename}")
+        return None 
+        
     try:
-        results = DDGS().text(query, max_results=max_results)
-        return "\n".join([f"- {r['title']}: {r['body']} (Source: {r['href']})" for r in results])
+        g = Github(token)
+        repo = g.get_user().get_repo("obsidian_notes") # 你的仓库名
+        path = f"{folder}/{filename}"
+        
+        # PyGithub 会自动处理父文件夹不存在的情况
+        try:
+            contents = repo.get_contents(path)
+            repo.update_file(path, f"Update {filename}", content, contents.sha)
+            print(f"✅ 更新文件成功: {path}")
+        except:
+            repo.create_file(path, f"Create {filename}", content)
+            print(f"✅ 创建文件成功: {path}")
+            
+        return f"https://github.com/yangyungit/obsidian_notes/blob/main/{path}"
     except Exception as e:
-        return f"搜索失败: {e}"
+        print(f"❌ GitHub 归档失败 [{path}]: {e}")
+        return None
 
-def get_stock_analysis(ticker):
-    try:
-        stock = yf.Ticker(ticker)
-        hist = stock.history(period="6mo")
-        info = stock.info
-        if hist.empty: return "无数据"
-        price = hist['Close'].iloc[-1]
-        return f"价格: {price:.2f} | 业务: {info.get('longBusinessSummary', '')[:50]}..."
-    except: return "分析失败"
-
-# --- 🧠 核心修复：智能分发逻辑 ---
+# --- 4. AI 分析与分发 (核心修改：20字结论) ---
 def auto_dispatch(client, raw_text):
-    """
-    V2.0: 更严格的分类与格式控制
-    """
+    api_key = get_config("GOOGLE_API_KEY")
+    if not api_key: return []
+
+    genai.configure(api_key=api_key)
+    
+    # 👇 Prompt 修改：Title 必须是结论，Logic Chain 必须清晰
     prompt = f"""
-    你是一个专业的金融情报路由员。请分析下面的文本，并严格按照 JSON 格式输出。
+    你是一个顶级宏观对冲基金的情报官。请分析以下文本。
     
-    【待分析文本】：
-    {raw_text}
+    【文本】：{raw_text[:6000]}
     
-    【分类规则 (Category)】：
-    1. MACRO (宏观): 仅限央行政策、CPI/PCE数据、地缘政治、大宗商品（黄金/原油）、汇率。
-    2. RADAR (个股/微观): 任何涉及具体上市公司（如 TSLA, NVDA, AAPL）、个股财报、具体产品发布、行业新闻。
-       * 注意：如果提到 "Tesla" 或 "Musk"，必须归类为 RADAR，哪怕它影响很大。
+    【任务】：
+    1. 识别主旨，拆分独立的宏观/雷达情报。
+    2. 提取原文时间。
+    3. **四维拆解**：事实、观点、逻辑、假设。
     
-    【输出格式 (JSON)】：
-    必须包含以下字段，不要包含 Markdown 格式：
-    {{
+    【输出 JSON 列表】：
+    [
+      {{
         "category": "MACRO" 或 "RADAR",
-        "summary": "一句话中文摘要（30字以内）",
-        "tags": ["#标签1", "#标签2"],
-        "bias": "利多/利空/中性"
-    }}
+        "title": "极简结论 (必须在20字以内，例如: 美联储鹰派言论将压制科技股估值)",
+        "summary": "完整的摘要内容 (保留供侦查室使用，但不在列表展示)",
+        "bias": "Bullish/Bearish/Neutral",
+        "tags": ["标签"],
+        "logic_chain_display": "逻辑链 (A -> B -> C，简练有力)",
+        "publication_date": "原文时间", 
+        "url": "原文链接",
+        "deep_analysis_md": "请按 Markdown 格式输出：\\n\\n### 1. 事实 (Facts)\\n...\\n\\n### 2. 观点 (Opinions)\\n...\\n\\n### 3. 逻辑 (Logic)\\n...\\n\\n### 4. 假设 (Assumptions)\\n..."
+      }}
+    ]
     """
     
-    try:
-        res = client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"} # 强制 JSON 模式
-        )
-        # 解析返回的 JSON
-        data = json.loads(res.choices[0].message.content)
+    analysis_results = []
+    for model_name in ['gemini-2.5-flash', 'gemini-2.0-flash']:
+        try:
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(prompt)
+            text = response.text.strip()
+            if text.startswith("```json"): text = text[7:]
+            if text.endswith("```"): text = text[:-3]
+            analysis_results = json.loads(text)
+            if not isinstance(analysis_results, list): analysis_results = [analysis_results]
+            break
+        except: continue
+    
+    if not analysis_results: return []
+
+    final_items = []
+    
+    # 1. 归档原文 (00_Inbox_AI)
+    # 再次强调：自动创建文件夹
+    # 增加 .replace(' ', '_')
+    safe_title = analysis_results[0].get('title', 'Untitled').replace('/', '_').replace(' ', '_')[:20]
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    raw_filename = f"{safe_title}_{timestamp}.md"
+    
+    raw_content = f"""# 原文归档
+    - **抓取时间**: {datetime.now().strftime("%Y-%m-%d %H:%M")}
+    - **原文时间**: {analysis_results[0].get('publication_date')}
+    - **来源**: {analysis_results[0].get('url')}
+    ---
+    {raw_text}
+    """
+    
+    # 推送到 00 (PyGithub 会自动创建 00_Inbox_AI 文件夹)
+    raw_link = push_to_github(raw_filename, raw_content, "00_Inbox_AI")
+    
+    # 2. 归档知识块 (01/02)
+    for item in analysis_results:
+        item['date'] = datetime.now().strftime("%Y-%m-%d")
         
-        # 🛡️ 安全检查：确保 summary 字段存在
-        if 'summary' not in data:
-            data['summary'] = raw_text[:20] + "..." # 如果 AI 没给摘要，就截取原文
+        # 链接容错
+        item['raw_doc_link'] = raw_link if raw_link else "#error_no_token"
         
-        return data
+        # 卡片内容
+        card_content = f"""# {item['title']}
+        - **分类**: {item['category']}
+        - **偏向**: {item['bias']}
+        - **原文**: [点击跳转]({item['raw_doc_link']})
         
-    except Exception as e:
-        return {"error": str(e), "category": "ERROR", "summary": "AI 解析失败"}
+        ## 深度结构化分析
+        {item['deep_analysis_md']}
+        """
+        
+        folder = "01_Macro_Research" if item.get('category') == "MACRO" else "02_Radar_Ticker"
+        card_filename = f"{item['title'].replace('/', '_')}.md"
+        
+        card_link = push_to_github(card_filename, card_content, folder)
+        item['card_link'] = card_link if card_link else "#error_no_token"
+        
+        final_items.append(item)
+        
+    return final_items

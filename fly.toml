@@ -1,0 +1,21 @@
+app = "system-white-glitter-4681"
+primary_region = "sjc"
+
+[deploy]
+  strategy = "immediate"  # 👈 关键：立即替换，不要滚动更新
+  
+# 👇👇👇 这一段是必须加回来的！
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 1024  # 稍微给多一点内存，Streamlit 比较吃内存
+
+  #哦也
