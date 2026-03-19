@@ -111,35 +111,42 @@ def push_to_github(filename, content, folder):
         return None
 
 # --- 4. AI 分析与分发 (核心修改：20字结论) ---
-def auto_dispatch(client, raw_text):
+def auto_dispatch(client, raw_text, source="External"): # 👈 必须加上这个！
     api_key = get_config("GOOGLE_API_KEY")
     if not api_key: return []
 
     genai.configure(api_key=api_key)
     
-    # 👇 Prompt 修改：Title 必须是结论，Logic Chain 必须清晰
+    # 👇 [架构师更新] 极简熵减版 Prompt
     prompt = f"""
-    你是一个顶级宏观对冲基金的情报官。请分析以下文本。
-    
+    你是一个金融情报系统的“极简摘要器”。请分析以下【文本】。
+
     【文本】：{raw_text[:6000]}
     
     【任务】：
-    1. 识别主旨，拆分独立的宏观/雷达情报。
-    2. 提取原文时间。
-    3. **四维拆解**：事实、观点、逻辑、假设。
-    
-    【输出 JSON 列表】：
+    1. 提取元数据：分类(MACRO/RADAR)、极简结论(Title)、偏向(Bias)。
+    2. **核心任务**：生成“深度分析字段(deep_analysis_md)”，严格遵守以下“熵减约束”。
+
+    【熵减约束 (Deep Analysis 格式要求)】：
+    你必须且只能输出以下 4 部分，严格用编号对齐，不要任何废话：
+    - 观点 (V)：V1, V2... (最多2条)
+    - 事实 (F)：F1, F2... (最多2条，必须包含数字或专名，否则删)
+    - 逻辑链 (L)：L1, L2... (括号内标注依赖，如 L1(V2+F2)，确保逻辑呼应)
+    - 假设 (A)：A1, A2... (用 A1->L1 标注支撑关系)
+    *每条限制 18 个中文字符，超出必须删减。若无有效信息，直接留空，严禁编造。*
+
+    【输出 JSON 格式】：
     [
       {{
         "category": "MACRO" 或 "RADAR",
-        "title": "极简结论 (必须在20字以内，例如: 美联储鹰派言论将压制科技股估值)",
-        "summary": "完整的摘要内容 (保留供侦查室使用，但不在列表展示)",
+        "title": "极简结论 (20字以内)",
+        "summary": "一句话摘要",
         "bias": "Bullish/Bearish/Neutral",
-        "tags": ["标签"],
-        "logic_chain_display": "逻辑链 (A -> B -> C，简练有力)",
-        "publication_date": "原文时间", 
-        "url": "原文链接",
-        "deep_analysis_md": "请按 Markdown 格式输出：\\n\\n### 1. 事实 (Facts)\\n...\\n\\n### 2. 观点 (Opinions)\\n...\\n\\n### 3. 逻辑 (Logic)\\n...\\n\\n### 4. 假设 (Assumptions)\\n..."
+        "tags": ["标签1", "标签2"],
+        "logic_chain_display": "A -> B (简短展示用)",
+        "publication_date": "YYYY-MM-DD", 
+        "url": "AI_Generated",
+        "deep_analysis_md": "V1 观点内容...\\nF1 事实内容...\\nL1(V1+F1) 逻辑内容...\\n..." 
       }}
     ]
     """

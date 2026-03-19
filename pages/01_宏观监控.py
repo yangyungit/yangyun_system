@@ -8,29 +8,85 @@ from scrapers.internal_generator import MACRO_OPEN_QUESTIONS
 st.set_page_config(page_title="宏观监控", page_icon="🌍", layout="wide")
 utils.inject_custom_css()
 st.title("🌍 宏观监控 (Macro)")
-# --- [架构师新增] 侧边栏：AI 生成功能 ---
+
+# --- [架构师升级版] 侧边栏：Gemini 3 Pro + 谷歌搜索 (Deep Research Lite) ---
+import time
+import google.generativeai as genai
+from scrapers.internal_generator import MACRO_OPEN_QUESTIONS
+
 with st.sidebar:
     st.markdown("### 🛠️ 情报工具箱")
-    if st.button("🚀 AI生成宏观", type="primary", use_container_width=True):
-        with st.status("正在调动 AI 进行深度范式推演...", expanded=True) as status:
-            for i, q in enumerate(MACRO_OPEN_QUESTIONS):
-                st.write(f"正在研判第 {i+1}/{len(MACRO_OPEN_QUESTIONS)} 组维度...")
-                
-                # 构造引导 Prompt，确保 AI 保持高水准输出 
-                structured_prompt = f"【系统指令：执行宏观范式专项研判】\n\n研判维度：{q}"
-                
-                # 调用 utils 核心分发函数 
-                # 这会自动完成：AI分析 -> GitHub存入00(原文)和01(卡片) -> Google Sheets 记录
-                utils.auto_dispatch(None, structured_prompt)
-                
-                time.sleep(1.5) # 频率保护，防止 API 触发速率限制
-            
-            status.update(label="✅ 宏观研判生成完毕！", state="complete", expanded=False)
+    if st.button("🚀 AI生成宏观 (联网版)", type="primary", use_container_width=True):
         
-        st.toast("情报已同步至 Google Sheets 及 GitHub", icon="💾")
+        # 初始化
+        api_key = utils.get_config("GOOGLE_API_KEY")
+        if api_key: genai.configure(api_key=api_key)
+        
+        # 🔥 关键修改：配置工具 (Tools)
+        # 这一步等于给了 AI 访问 Google 搜索的权限
+        tools = [
+            {"google_search_retrieval": {
+                "dynamic_retrieval_config": {
+                    "mode": "dynamic",  # 只有需要搜的时候才搜
+                    "dynamic_threshold": 0.6,
+                }
+            }}
+        ]
+
+        # 👑 加载模型：Gemini 3 Pro + Tools
+        try:
+            model = genai.GenerativeModel('gemini-3-pro-preview', tools=tools)
+        except:
+            # 如果 3-Pro 不支持 Tools，退回到 2.0-Pro
+            st.warning("3-Pro 暂不支持搜索工具，降级为 2.0-Pro...")
+            model = genai.GenerativeModel('gemini-2.0-pro-exp-02-05', tools=tools)
+
+        with st.status("正在进行联网深度推演...", expanded=True) as status:
+            for i, q in enumerate(MACRO_OPEN_QUESTIONS):
+                st.write(f"正在研判: {q[:15]}...")
+                
+                try:
+                    # 直球生成 (现在它会自动去 Google 搜最新的数据了！)
+                    response = model.generate_content(q)
+                    
+                    # 检查有没有用到搜索（调试用）
+                    search_source = ""
+                    if response.candidates[0].grounding_metadata.search_entry_point:
+                        search_source = "\n\n*(已调用 Google Search 实时数据)*"
+
+                    raw_answer = response.text + search_source
+                    
+                    # 物理拼接
+                    final_content = f"""
+# ❓ 提问 (Question)
+{q}
+
+---
+# 🌐 联网回答 (Web-Search Answer)
+{raw_answer}
+"""
+                    
+                    # 发送给中台
+                    new_items = utils.auto_dispatch(None, final_content, source="AI_Macro_Search")
+                    
+                    # 写入数据库
+                    if new_items:
+                        current_data = utils.load_data("macro_stream")
+                        updated_data = new_items + current_data
+                        utils.save_data(updated_data, "macro_stream")
+                        
+                except Exception as e:
+                    st.error(f"Error: {e}")
+                
+                time.sleep(2) # 联网搜索比较慢，频率保护要加长
+            
+            status.update(label="✅ 深度调研完成", state="complete", expanded=False)
+        
+        st.toast("已生成含实时数据的研报", icon="🌍")
         time.sleep(1)
-        st.rerun() # 自动刷新页面，展示最新生成的情报
-# --- 加载数据 ---
+        st.rerun()
+
+        
 try:
     raw_data = utils.load_data(sheet_name="macro_stream")
     st.session_state['macro_data'] = raw_data
