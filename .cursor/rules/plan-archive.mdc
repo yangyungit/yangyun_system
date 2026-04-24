@@ -1,0 +1,93 @@
+---
+description: Plan 产出与执行规范——产出 plan 时标注模型,执行 ~/.cursor/plans/*.plan.md 时的行为边界与归档动作
+alwaysApply: true
+---
+
+# Plan 产出与执行
+
+## 产出 plan（Plan Mode 或任何产出 plan 的场景）
+
+Plan 文件 frontmatter 必须包含以下字段（否则夜班派发脚本无法读取）：
+
+```yaml
+---
+model: composer-2-standard  # composer-2-standard | claude-4.6-sonnet | claude-opus-4-7
+complexity: simple           # simple | medium | complex
+---
+```
+
+**模型选择依据**：
+
+- `composer-2-standard`:简单执行类任务(补测试、重命名、格式化、数据抓取、文档生成)
+- `claude-4.6-sonnet`:中等任务(多文件调整、标准重构、常规 bug 修复)
+- `claude-opus-4-7`:复杂推理任务(策略优化、因子调权、架构级重构、难 debug)
+
+拿不准时按 complexity 向上一档选(保底不翻车优先于省钱)。
+
+## 执行 plan（当 agent 被要求执行 ~/.cursor/plans/*.plan.md 时）
+
+### 执行前
+
+- 每个 plan 必须在独立 git worktree 跑(CLI headless 的 `--worktree` 参数自动处理)
+- 读 plan 文件全文,确认验收标准是机器可自动判断的
+- 若 plan 里没写"不准动清单",按本 rule 的默认清单执行
+
+### 硬上限(按 complexity 分档,plan 里另写以 plan 为准)
+
+| complexity | 墙上时间 | Token 成本 | 失败重试 |
+|---|---|---|---|
+| simple  | ≤ 30 min | ≤ $2  | ≤ 2 |
+| medium  | ≤ 60 min | ≤ $5  | ≤ 3 |
+| complex | ≤ 90 min | ≤ $15 | ≤ 3 |
+
+撞上任何上限:**立即停,保留现场,不要 commit,不要回滚**
+
+## 不准动清单
+
+### 通用（所有项目共用）
+
+- 不准改 `requirements.txt` / `pyproject.toml` / `package.json` / `Cargo.toml` 等依赖清单
+- 不准动 DB schema / migration 文件
+- 不准动 `.env` / `credentials*` / `secrets*` / `*-key*.json` / `*.db`
+- 不准 `git push` 到 main / master / prod 分支
+- 不准新增付费第三方 API 或 SaaS 绑定
+
+### system 项目特定
+
+- 不准动 `monitor_state.json`（监控状态持久化,动了丢监控连续性）
+- 不准动 `news_database.json`（新闻库持久化）
+- 不准动 `venv/`（Python 虚拟环境目录）
+- 不准动 `fly.toml`（Fly.io 部署配置）
+- 不准动 `telegram_bot.py` 和 `discord_agent.py` 的 token / 长连接逻辑(涉及线上 bot 服务稳定性)
+
+## 执行完毕后的归档动作
+
+**成功跑绿**（验收标准全部达成）：
+
+```bash
+mv ~/.cursor/plans/<plan名>.plan.md ~/.cursor/plans/executed/$(date +%Y-%m)/
+```
+
+目录不存在先 `mkdir -p`。
+
+**失败或中途停**：
+
+- plan 文件留在 `~/.cursor/plans/` 根目录原位置
+- 在文件顶部追加一行：`<!-- YYYY-MM-DD 执行失败,原因:<一句话> -->`
+- 保留 worktree 现场供第二天 debug
+
+## 夜班汇总报告
+
+多个 plan 连续执行（夜班场景）时,全部跑完后生成汇总报告：
+
+```
+~/.cursor/plans/nightly-reports/YYYY-MM-DD.md
+```
+
+每个 plan 记录：状态（绿/卡）、耗时、token 消耗、改动文件清单、失败原因（如有）、需要主理人决策的未解问题。
+
+## 不触发本 rule 的场景
+
+- agent 在 Plan Mode 里**产出**新 plan——这是创建,不是执行,无需归档
+- 主理人手动引用 plan 文件作为**上下文参考**而非执行目标——无需归档
+- plan 文件位于项目内的 `.cursor/plans/`（点过 Save to workspace）——按项目自身规则处理,不走本 rule
