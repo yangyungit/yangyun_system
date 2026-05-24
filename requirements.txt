@@ -11,3 +11,6 @@ duckduckgo-search
 google-generativeai
 plotly
 cloudscraper
+yfinance
+sec-edgar-downloader
+pandas
