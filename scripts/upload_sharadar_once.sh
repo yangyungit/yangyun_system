@@ -32,4 +32,5 @@ rclone copy "$SRC" "R2:$R2_BUCKET/sharadar/" \
 
 echo "--- 传完后对账 ---"
 rclone size "R2:$R2_BUCKET/sharadar/"
-du -sh --exclude=parquet "$SRC" 2>/dev/null || du -sh "$SRC"/*.zip | tail -1
+echo -n "本地 zip 总字节: "
+(cd "$SRC" && ls -l *.zip _manifest.json | awk '{s+=$5} END {print s}')
