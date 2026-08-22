@@ -6,7 +6,7 @@
     python3 scan_topics.py 30         # 回溯一个月，第一次跑用这个
 
 只做粗筛和摘要，不判断值不值得写——判断要开一个会话，
-读 obsidian_notes/99_Human_Zone/养云协作/深读栏目.md 里「选题池」一节的规则。
+读 obsidian_notes/99_Human_Zone/深读选题池.md 里的规则。
 
 粗筛条件：顶层 md、够长、不是思维模型库、没被选题池或深读列表收录过。
 """
@@ -17,7 +17,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 ZONE = ROOT / "obsidian_notes" / "99_Human_Zone"
-POOL = ZONE / "养云协作" / "深读栏目.md"
+POOL = ZONE / "深读选题池.md"
 PUBLISHED = ZONE / "深读列表.md"
 PENDING = ROOT / "memory" / "inbox" / "topics-pending.md"
 
@@ -29,7 +29,7 @@ NUMBERED = re.compile(r"^\d{3} ")
 
 # 内部运营文档，不对外发；靠文件名兜底，漏了由判断会话剔
 INTERNAL = re.compile(
-    r"环节$|清单$|列表$|模板$|^EP\d|^养云|^躺盈|prompt|todo|FAQ|架构$|页面|后台|前台",
+    r"环节$|清单$|列表$|模板$|选题池$|^EP\d|^养云|^躺盈|prompt|todo|FAQ|架构$|页面|后台|前台",
     re.I,
 )
 
@@ -73,6 +73,8 @@ def collect(days):
 
     for f in sorted(ZONE.glob("*.md"), key=lambda p: p.stat().st_mtime):
         name = f.stem
+        if f in (POOL, PUBLISHED):
+            continue
         if f.stat().st_mtime < cutoff or name in seen:
             continue
         if NUMBERED.match(name) or INTERNAL.search(name):
@@ -110,7 +112,7 @@ def main():
         if new_file:
             fh.write(
                 "# 待判断选题\n\n"
-                "判断规则见 `obsidian_notes/99_Human_Zone/养云协作/深读栏目.md` 里「选题池」一节。"
+                "判断规则见 `obsidian_notes/99_Human_Zone/深读选题池.md`。"
                 "判断完把这个文件清空。\n"
             )
         fh.write(f"\n## 扫描 {time.strftime('%Y-%m-%d')}（近 {days} 天）\n")
