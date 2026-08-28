@@ -30,6 +30,14 @@ die() { log "错误：$*"; exit 1; }
 
 mkdir -p "$STAGE"
 
+# 机器每天晚上关机，凌晨的定时点跑不到，所以改成开机即跑。
+# 打点文件保证一天只成功跑一次，开机触发和 16:00 兜底触发不会重复备份。
+STAMP="$STAGE/.last_run"
+if [[ "${1:-}" != "--force" && -f "$STAMP" && "$(cat "$STAMP")" == "$DATE" ]]; then
+    log "今天已备份过，跳过"
+    exit 0
+fi
+
 command -v sqlite3 >/dev/null || die "缺 sqlite3"
 command -v zstd >/dev/null || die "缺 zstd，跑 brew install zstd"
 
@@ -106,4 +114,5 @@ fi
 
 # --- 清理本地暂存 ---
 find "$STAGE" -type f \( -name "*.sql.zst" -o -name "*.enc" \) -mtime +2 -delete
+echo "$DATE" > "$STAMP"
 log "全部完成"
