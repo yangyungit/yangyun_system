@@ -19,7 +19,41 @@
     "UC7a-6VBQsQPkgUlMvSxFMXg  # 认知书页 2.64万 / 104条 —— 讲书",
     "UCGxOCEFTowvGuGhcAIuwedw  # 查理的創業化合物 18.6万 / 1008条 —— 创业访谈",
     "UCEYLKxnZnvYeYDU_5R_iV-Q  # 后起之秀 Rising 7.84万 / 224条 —— 创业访谈",
-    "UCShBd7dtD2H5Ue83jJTo1DA  # 澳洲Henry 62.7万 / 583条 —— 移民/海外资产"
+    "UCShBd7dtD2H5Ue83jJTo1DA  # 澳洲Henry 62.7万 / 583条 —— 移民/海外资产",
+
+    "# ↓ 第二批：从 304 个 yt-dlp 候选里粗筛 76 个，screen 判形态 + peek 验标题后留下的",
+    "UCZNxe_9FQAK2Z3suwaZlwpQ  # 冲浪普拉斯 52.3万 / 260条 —— 消费品牌拆解「凯乐石凭什么让中产买单」",
+    "UCKV2yWPB3wn0RTZh3cTD8YA  # 硅谷101 46.3万 / 239条 —— 科技产业深度",
+    "UCXjk9RSGtUWbll5iN_Fgmqw  # 十萬個品牌故事 17.8万 / 1809条 —— 品牌故事量产",
+    "UCjrP2TtSTifuRJ76hW2IW1A  # Nick 美股咖啡館 15.5万 / 918条",
+    "UCeTEWFsNC3eeUsn9hvsDALQ  # 老汤美股财经 15.3万 / 431条 —— 财经率 90%",
+    "UCWyPo32TSKPr8Py7gb7NhYw  # 美股投资网 13.1万 / 539条",
+    "UCHNa1-5xkPI8u8sESaaAwNQ  # 华人百科 11.5万 / 279条",
+    "UCGEEYJmyLbxZyJh1yYejE9g  # 藝哥商業故事 10.7万 / 58条 —— 和你定位最接近的之一",
+    "UCYxfjQniftquQqn3gkOG1Yw  # 狮子座财经 6.43万 / 101条",
+    "UCbJpRVF1AB2KO1cvQoK0S5Q  # 宏观洞察 5.55万 / 650条 —— 宏观选题，标题干净",
+    "UCwyolsdQe5g8RRGh3ATQwOQ  # 半撇老师 4.92万 / 93条",
+    "UCSHz99Y29L29XCQpgBdI2uA  # 有点在李 4.06万 / 66条 —— 财经率 74%",
+    "UCYlXf2VfELcjFH0JYi5yjmQ  # 品牌简史 3.6万 / 59条 —— 「LV為什麼這麼貴」，最贴你的定位",
+    "UCcdvFAyMSkYM10VyR1JjUVQ  # 黑猫研究院 3.59万 / 311条 —— 「賣輪胎的公司为何能决定米其林餐厅」"
+  ],
+
+  "_排除_搜出来但不是这个赛道": [
+    "第二批 76 个候选里排掉的，理由都是 peek 看过标题：",
+    "UCdok8jHNfHCWNPwkmBiapmg  # 富人俱樂部 59万 —— 成功学鸡汤，不讲公司",
+    "UCf3L4JtdfRX5E2Q1rZqYJaw  # 小鸣说 37.2万 —— 历史与艺术赏析",
+    "UCpC2D7JdcB8nlfzhX08i7fg  # VEXILLA潮時務所 31.4万 —— 时政八卦",
+    "UCCeMdcZw1LJsAGKeoYXZw6A  # 硬核刘大 11.9万 —— 时政八卦",
+    "UCydy3PZfKTnajegMNdCqjfw  # 大老王真知灼见 3.21万 —— 时政八卦",
+    "UCsjah46z5iVDeh1mcAQaKtA  # 商業本質 4.09万 —— AI 新闻搬运配 emoji 标题党",
+    "UC9C3t-3ocL0LiwGRD0gBJ8A  # Gary Chen 7.98万 —— 编程",
+    "UCXUP_aBLQBNFgLjvnrMTHtw  # 尼可拉斯楊 17.5万 —— 荐股喊单",
+    "UCGmFPhWxFZK_JHxITRR3jMA  # 社長劉洋 24.3万 —— 日本房产",
+    "UCGGrblndNzi86WY5lJkQJiA  # cheap 163万 —— 台湾地方史，形态像但不是财经",
+    "UC2tQpW0dPiyWPebwBSksJ_g  # 脑洞乌托邦 257万 —— 悬疑未解之谜",
+    "UC9HOOTENXN_Q2AJ7eozWBXA  # M2档案 109万 —— 军事历史",
+    "UCMUnInmOkrWN4gof9KlhNmQ  # 老高與小茉 672万 —— 奇闻",
+    "UCwlpC8vX_GkRngPYSnwkJxg  # 商業周刊 62.6万 —— 媒体日更"
   ],
 
   "_排除_日更盘报": [

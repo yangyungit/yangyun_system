@@ -376,6 +376,79 @@ def cmd_peek(args):
     print(f"\n本次 {yt.calls} 次请求，花 {yt.used} units", file=sys.stderr)
 
 
+DATE_IN_TITLE = re.compile(
+    r"20\d{2}[-/._年]\s?\d{1,2}[-/._月]\s?\d{1,2}|\d{1,2}月\d{1,2}[日号]|\(\d{1,2}/\d{1,2}\)")
+
+
+def _verdict(gap, dated, ontopic, title_len, min_ontopic):
+    """拿已知的 8 个日更号和 7 个选题号校准出来的规则。
+
+    带日期是唯一干净的信号：8 个日更号里 6 个标题带日期（38%~100%），
+    7 个选题号全是 0%。发文频率不能当判据——小A学财经日更《滚雪球》系列，
+    但每条标题都是实打实的选题；把频道名写进标题（老周横眉 90%、D的財富鏈 94%）
+    也只是打品牌，不影响关键词统计。
+
+    贝拉聊财金那种「今晚：又来救市了...」无日期无台标的，规则抓不出来，
+    所以日更的一律标成待人工确认，不硬判。"""
+    if dated >= .3 or title_len >= 80:
+        return "日更盘报"
+    if ontopic < min_ontopic:
+        return "不是财经"
+    return "待人工确认" if gap <= 1 else "选题深度"
+
+
+def cmd_screen(args):
+    """每个频道 1 unit 拉 50 条最近上传，自动判断是「日更盘报」还是「选题深度」。
+
+    判别主要看发布间隔：日更号中位间隔 1 天，选题号 7 天以上。辅助看标题里
+    有没有日期（「NaNa说美股(2026.09.03)」这种标题不含选题信息，做不了关键词统计）。
+    扩到几十个号以后肉眼一条条看不现实，所以做成自动的。"""
+    cfg = load_config(args.config)
+    yt = YT(load_key(args.key))
+    rows = []
+    for ch in resolve(yt, args.channel or cfg["channels"], args.allow_search):
+        page = yt.get("playlistItems", part="snippet,contentDetails",
+                      playlistId=ch["uploads_playlist"], maxResults=50)
+        items = page.get("items", [])
+        if len(items) < 5:
+            continue
+        dates = sorted(it["contentDetails"]["videoPublishedAt"][:10]
+                       for it in items if it["contentDetails"].get("videoPublishedAt"))
+        titles = [it["snippet"]["title"] for it in items]
+        gaps = [(dt.date.fromisoformat(b) - dt.date.fromisoformat(a)).days
+                for a, b in zip(dates, dates[1:])]
+        gap = sorted(gaps)[len(gaps) // 2] if gaps else 0
+        dated = sum(bool(DATE_IN_TITLE.search(t)) for t in titles) / len(titles)
+        # 频道名写进每条标题的，基本都是日更号在打品牌
+        stamped = sum(ch["channel"][:4] in t for t in titles) / len(titles)
+        # 搜索会捞回一堆短剧号、悬疑号、时政号，用关键词命中率量化「到底讲不讲商业财经」
+        words = [w.lower() for ws in cfg["groups"].values() for w in ws]
+        ontopic = sum(any(w in t.lower() for w in words) for t in titles) / len(titles)
+        rows.append({
+            "channel": ch["channel"], "channel_id": ch["channel_id"],
+            "subs": ch["subscribers"], "videos": ch["video_count"],
+            "间隔天": gap, "带日期": round(dated, 2), "带台标": round(stamped, 2),
+            "财经率": round(ontopic, 2),
+            "标题长": sorted(len(t) for t in titles)[len(titles) // 2],
+            "判定": _verdict(gap, dated, ontopic,
+                             sorted(len(t) for t in titles)[len(titles) // 2],
+                             args.min_ontopic),
+        })
+
+    df = pd.DataFrame(rows).sort_values(["判定", "subs"], ascending=[True, False])
+    os.makedirs(DATA_DIR, exist_ok=True)
+    path = os.path.join(DATA_DIR, "screen.csv")
+    df.to_csv(path, index=False, encoding="utf-8-sig")
+
+    print("\n| 频道 | 订阅 | 视频数 | 发布间隔 | 带日期 | 带台标 | 财经率 | 标题长 | 判定 | ID |")
+    print("|---|---|---|---|---|---|---|---|---|---|")
+    for r in df.itertuples():
+        print(f"| {r.channel} | {r.subs:,} | {r.videos:,} | {r.间隔天}天 | {r.带日期:.0%} | "
+              f"{r.带台标:.0%} | {r.财经率:.0%} | {r.标题长} | {r.判定} | {r.channel_id} |")
+    print(f"\n{len(df)} 个 → {path}", file=sys.stderr)
+    print(f"本次 {yt.calls} 次请求，花 {yt.used} units", file=sys.stderr)
+
+
 def cmd_fetch(args):
     cfg = load_config(args.config)
     yt = YT(load_key(args.key))
@@ -578,6 +651,13 @@ def main():
     p.add_argument("-n", type=int, default=5)
     p.add_argument("--allow-search", action="store_true")
     p.set_defaults(func=cmd_peek)
+
+    p = sub.add_parser("screen", help="批量判断是日更盘报还是选题深度，1 unit 一个")
+    p.add_argument("channel", nargs="*", help="不传就用配置里全部频道")
+    p.add_argument("--min-ontopic", type=float, default=0.3,
+                   help="最近 50 条标题里命中财经关键词的比例低于此值，判为不是这个赛道")
+    p.add_argument("--allow-search", action="store_true")
+    p.set_defaults(func=cmd_screen)
 
     p = sub.add_parser("fetch", help="拉视频存 csv + parquet")
     p.add_argument("--since", help="只要这天之后发的，如 2023-01-01")
