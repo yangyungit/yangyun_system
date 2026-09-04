@@ -5,4 +5,6 @@ __pycache__/
 *.json
 data/*.db
 data/channel_ranking/
+data/yt_research/
 scripts/*.log
+!scripts/yt_research_config.json
