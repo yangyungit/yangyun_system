@@ -33,6 +33,7 @@ import sys
 import time
 import datetime as dt
 
+import numpy as np
 import pandas as pd
 import requests
 
@@ -631,6 +632,109 @@ def cmd_gaps(args):
     print(f"\n→ {path}", file=sys.stderr)
 
 
+def cmd_profile(args):
+    """单个频道体检：主线是什么、偏离主线要付多大代价。不花配额，只读本地数据。
+
+    「主线」不靠人指定，用标题里出现 >=3 次的字串去撞播放量：某个说法出现的
+    那些视频，播放中位数比该频道平常水平高多少。小Lin说的「一口气」这样撞出来
+    是 1.6 倍，她偏离主线的 vlog 和旅游就掉到 0.3 倍。"""
+    df = pd.read_parquet(os.path.join(DATA_DIR, "videos.parquet"))
+    for extra in ("extra.parquet", "gao_all.parquet"):
+        p = os.path.join(DATA_DIR, extra)
+        if os.path.exists(p):
+            df = pd.concat([df, pd.read_parquet(p)])
+    df = df.drop_duplicates("video_id")
+    hit = df[df["channel"].str.contains(args.channel, case=False, na=False)]
+    if hit.empty:
+        raise SystemExit(f"数据里没有匹配「{args.channel}」的频道，先 fetch")
+    name = hit["channel"].value_counts().index[0]
+    g = df[df["channel"] == name]
+    if not args.include_shorts:
+        g = g[~g["is_short"]]
+    if args.since:
+        g = g[g["published"].str[:10] >= args.since]
+    g = g[g["views"] > 0]  # 预告和未公开的视频播放是 0，会把高低差撑到荒谬
+
+    # 很多人把频道名固定挂在标题尾巴上（老高每条都带「| 老高與小茉 Mr & Mrs Gao」），
+    # 不去掉的话它会被切成一堆假的高频说法
+    g = g.assign(title=g["title"].str.replace(
+        r"\s*[|｜-]\s*[^|｜]{0,24}$" if args.strip_tail else r"(?!x)x", "", regex=True))
+    med = g["views"].median()
+    print(f"\n=== {name} ===")
+    print(f"{len(g)} 条 / {g['published'].min()[:10]} ~ {g['published'].max()[:10]}")
+    print(f"播放中位 {int(med):,}  最高 {g['views'].max():,}  最低 {g['views'].min():,}"
+          f"  高低差 {g['views'].max() / max(g['views'].min(), 1):.0f} 倍")
+    print(f"离散度(P75/P25) {g['views'].quantile(.75) / max(g['views'].quantile(.25), 1):.2f}"
+          f"  时长中位 {g['duration_sec'].median() / 60:.0f} 分"
+          f"  疑问句 {g['title'].str.contains(r'[?？]').mean():.0%}")
+
+    print(f"\n--- 每半年 ---")
+    half = g["published"].str[:4] + "H" + (
+        (pd.to_datetime(g["published"].str[:10]).dt.month > 6).astype(int) + 1).astype(str)
+    for h, sub in g.groupby(half):
+        print(f"  {h}  {len(sub):>3}条  播放中位 {int(sub['views'].median()):>10,}")
+
+    # 标题里所有 2~5 字的连续片段，出现够多次的拿去撞播放量
+    def ok(s):
+        """整段中文（>=2 字）或整个英文词（>=3 字母）才算一个说法，
+        「bo」「t 」这种跨词切出来的碎片全扔掉。"""
+        if re.search(r"[|｜#@]", s):
+            return False
+        return (len(re.findall(r"[\u4e00-\u9fff]", s)) >= 2
+                and not re.search(r"[A-Za-z0-9]", s)) or re.fullmatch(r"[A-Za-z]{3,}", s)
+
+    counts, hits = {}, {}
+    for t, v in zip(g["title"], g["views"]):
+        seen = set()
+        for n in range(2, 8):
+            for i in range(len(t) - n + 1):
+                s = t[i:i + n]
+                if s in seen or not ok(s):
+                    continue
+                seen.add(s)
+                counts[s] = counts.get(s, 0) + 1
+                hits.setdefault(s, []).append(v)
+    rows = [{"说法": s, "出现": c, "播放中位": int(np.median(hits[s])),
+             "倍数": round(np.median(hits[s]) / med, 2)}
+            for s, c in counts.items() if c >= args.min_n]
+    r = pd.DataFrame(rows)
+    if r.empty:
+        print(f"\n没有出现 >= {args.min_n} 次的说法，--min-n 调小点")
+        return
+    # 「一口气了解」会连带出「一口气」「口气了」一堆子串。留最长的那个：
+    # 只要有更长的说法把它包住、且出现次数差不多，短的就是碎片
+    words = sorted(r["说法"], key=len, reverse=True)
+    cnt = dict(zip(r["说法"], r["出现"]))
+    drop = {s for s in words
+            if any(len(w) > len(s) and s in w and cnt[w] >= cnt[s] * .75 for w in words)}
+    r = r[~r["说法"].isin(drop)]
+    # 「【硬核】一口气」「硬核】一口气了」「核】一口气了解」是同一批视频切出来的三刀，
+    # 出现次数和播放中位一模一样。同一组只留一个，优先留不以标点开头结尾的
+    edge = re.compile(r"^[^\w\u4e00-\u9fff]|[^\w\u4e00-\u9fff]$")
+    r = (r.assign(_干净=[not edge.search(s) for s in r["说法"]])
+          .sort_values(["_干净", "说法"], key=lambda s: s.map(len) if s.name == "说法" else s,
+                       ascending=False)
+          .drop_duplicates(["出现", "播放中位"]).drop(columns="_干净"))
+
+    print(f"\n--- 主线：说法出现 >= {args.min_n} 次，播放中位是频道平常水平的几倍 ---")
+    print("| 说法 | 出现 | 播放中位 | 倍数 |")
+    print("|---|---|---|---|")
+    for x in r.nlargest(args.top, "倍数").itertuples():
+        print(f"| {x.说法} | {x.出现} | {x.播放中位:,} | {x.倍数} |")
+    print(f"\n--- 拖后腿的说法 ---")
+    print("| 说法 | 出现 | 播放中位 | 倍数 |")
+    print("|---|---|---|---|")
+    for x in r.nsmallest(args.top, "倍数").itertuples():
+        print(f"| {x.说法} | {x.出现} | {x.播放中位:,} | {x.倍数} |")
+
+    print(f"\n--- 播放最高 5 条 ---")
+    for x in g.nlargest(5, "views").itertuples():
+        print(f"  {x.views:>10,}  {x.title[:56]}")
+    print(f"--- 播放最低 5 条 ---")
+    for x in g.nsmallest(5, "views").itertuples():
+        print(f"  {x.views:>10,}  {x.title[:56]}")
+
+
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -665,6 +769,16 @@ def main():
     p.add_argument("--refresh", action="store_true", help="忽略缓存重新拉")
     p.add_argument("--allow-search", action="store_true")
     p.set_defaults(func=cmd_fetch)
+
+    p = sub.add_parser("profile", help="单个频道体检：主线是什么、偏离主线代价多大")
+    p.add_argument("channel", help="频道名，支持部分匹配")
+    p.add_argument("--since")
+    p.add_argument("--include-shorts", action="store_true")
+    p.add_argument("--min-n", type=int, default=3, help="说法至少出现几次才参与统计")
+    p.add_argument("--top", type=int, default=12)
+    p.add_argument("--no-strip-tail", dest="strip_tail", action="store_false",
+                   help="别去掉标题尾巴上的频道名后缀")
+    p.set_defaults(func=cmd_profile, strip_tail=True)
 
     for name, fn, helptext in [("stats", cmd_stats, "按关键词分组比播放量"),
                                ("gaps", cmd_gaps, "红海 / 空缺矩阵")]:
