@@ -24,6 +24,10 @@ PENDING = ROOT / "memory" / "inbox" / "topics-pending.md"
 MIN_BYTES = 3000  # 低于这个基本是 stub 或一句话备忘，撑不起一篇
 SUMMARY_LEN = 500
 
+BACKLOG_ALERT = 15  # 待判断攒过这个数，就在选题池顶上挂一行，不然只在 inbox 里无声堆着
+MARK_BEGIN = "<!-- backlog -->"
+MARK_END = "<!-- /backlog -->"
+
 # 编号开头的是芒格思维模型库，批量导入的，不是聊出来的
 NUMBERED = re.compile(r"^\d{3} ")
 
@@ -99,11 +103,43 @@ def collect(days):
     return out
 
 
+def backlog():
+    """待判断清单里攒了多少条、最早那批是哪天扫的。"""
+    if not PENDING.exists():
+        return 0, ""
+    text = PENDING.read_text(errors="ignore")
+    dates = re.findall(r"^## 扫描 (\S+)", text, re.M)
+    return len(re.findall(r"^### ", text, re.M)), dates[0] if dates else ""
+
+
+def mark_pool():
+    """堆过阈值就在选题池顶上挂提醒；判完清空 pending 后下次扫描自动摘掉。"""
+    if not POOL.exists():
+        return
+    text = re.sub(
+        f"{re.escape(MARK_BEGIN)}.*?{re.escape(MARK_END)}\n*",
+        "",
+        POOL.read_text(),
+        flags=re.S,
+    )
+    count, since = backlog()
+    if count >= BACKLOG_ALERT:
+        text = text.replace(
+            "## 选题池\n",
+            f"## 选题池\n\n{MARK_BEGIN}\n"
+            f"> 待判断攒了 {count} 条（最早 {since}），在 `memory/inbox/topics-pending.md`。"
+            f"开个会话按下面四项过一遍。\n{MARK_END}\n",
+            1,
+        )
+    POOL.write_text(text)
+
+
 def main():
     days = int(sys.argv[1]) if len(sys.argv) > 1 else 2
     found = collect(days)
     if not found:
         print("无新候选")
+        mark_pool()
         return
 
     PENDING.parent.mkdir(parents=True, exist_ok=True)
@@ -121,6 +157,8 @@ def main():
             fh.write(
                 f"\n### [[{name}]]\n{day} · {size // 1000}KB · 提到 {yrs} 处年份\n\n{summary}\n"
             )
+
+    mark_pool()
 
     print(f"{PENDING}：新增 {len(found)} 条候选")
     for yrs, _, name, _, _ in found:
