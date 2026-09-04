@@ -270,18 +270,38 @@ def tag_groups(df, groups):
     return pd.concat([tagged, rest], ignore_index=True)
 
 
-def add_view_index(df):
+def add_view_index(df, baseline="21"):
     """同一个频道里，老视频攒的播放多、大频道基数高，直接比中位数会把
-    「哪类选题跑得动」和「谁家粉丝多」混在一起。所以除以「同频道同一年」的
-    播放中位数，得到 1.0 = 这个频道那一年的平均水平。当年样本 < 5 条就退回全频道中位数。"""
-    df = df.copy()
-    df["year"] = df["published"].str[:4]
-    base_y = df.groupby(["channel_id", "year"])["views"].transform("median")
-    n_y = df.groupby(["channel_id", "year"])["views"].transform("size")
-    base_c = df.groupby("channel_id")["views"].transform("median")
-    base = base_y.where(n_y >= 5, base_c)
+    「哪类选题跑得动」和「谁家粉丝多」混在一起。所以每条视频都除以一个
+    「这个号当时的平常水平」，1.0 = 平常水平。
+
+    基线怎么取会明显影响结论，所以做成可切换的，三种各有偏：
+      数字   同频道发布时间相邻 N 条的播放中位数。跟得上频道成长，但选题成串发时
+             （大時叔叔连发 20 条二战）窗口本身就变成该选题的水平，优势被自己吃掉
+      year   同频道同一自然年的中位数。不吃成串发的选题，但频道成长期会算错——
+             大時叔叔 2024 年只发 4 条、不满 5 条就退回全频道中位数 12 万，
+             那几条被算成 0.03 倍，凭空多出一批「扑街选题」
+      channel 全频道一个中位数。最不吃选题，但完全无视频道成长和播放积累
+    拿不准就跑 stats --sensitivity 看结论在六种口径下稳不稳。"""
+    df = df.sort_values(["channel_id", "published"]).copy()
+    by_ch = df.groupby("channel_id")["views"]
+    if baseline == "channel":
+        base = by_ch.transform("median")
+    elif baseline == "year":
+        year = df["published"].str[:4]
+        grp = df.groupby(["channel_id", year])["views"]
+        base = grp.transform("median").where(grp.transform("size") >= 5,
+                                             by_ch.transform("median"))
+    else:
+        base = by_ch.transform(
+            lambda s: s.rolling(int(baseline), center=True, min_periods=5).median())
+        # 整个频道不足 5 条时 rolling 全是 NaN，只能退回全频道中位数
+        base = base.fillna(by_ch.transform("median"))
     df["view_index"] = (df["views"] / base.replace(0, pd.NA)).astype(float)
     return df
+
+
+BASELINES = ["11", "21", "51", "101", "year", "channel"]
 
 
 # ---------- 子命令 ----------
@@ -421,7 +441,7 @@ def _load_videos(args):
                   file=sys.stderr)
     if df.empty:
         raise SystemExit("过滤完一条不剩，放宽 --since 或加 --include-shorts")
-    return add_view_index(df)
+    return add_view_index(df, getattr(args, "baseline", "21"))
 
 
 def cmd_stats(args):
@@ -443,8 +463,10 @@ def cmd_stats(args):
     print(f"\n样本：{len(df)} 条视频 / {df['channel_id'].nunique()} 个频道"
           f"（{df['published'].min()[:10]} ~ {df['published'].max()[:10]}"
           f"{'，已剔除 60 秒内的 Shorts' if not args.include_shorts else ''}）")
-    print("\n相对指数 = 该视频播放 ÷ 同频道同年播放中位数。1.0 就是这个频道的平常水平，"
-          "\n1.5 表示这类选题比该频道自己的平均线高 50%。跨频道比就看它，不要看绝对中位数。\n")
+    print(f"\n相对指数 = 该视频播放 ÷ 这个号当时的平常水平（基线口径 {args.baseline}）。"
+          "\n1.0 就是平常水平，1.5 表示这类选题比该频道自己的平均线高 50%。"
+          "\n跨频道比就看它，不要看绝对中位数。换个基线口径结论可能就变，"
+          "\n下结论前先跑 --sensitivity 看稳不稳。\n")
     print("| 组 | 视频数 | 频道数 | 播放中位数 | P75 | 最高 | 相对指数中位 | 点赞/播放 |")
     print("|---|---|---|---|---|---|---|---|")
     for name, r in out.iterrows():
@@ -456,6 +478,16 @@ def cmd_stats(args):
         pt = t.pivot_table(index="group", columns="channel",
                            values="view_index", aggfunc="median").round(2)
         print(pt.to_markdown())
+
+    if args.sensitivity:
+        sens = pd.DataFrame({b: tag_groups(add_view_index(df, b), cfg["groups"])
+                             .groupby("group")["view_index"].median().round(2)
+                             for b in BASELINES})
+        sens.insert(0, "视频数", g.size())
+        print("\n换基线口径看结论稳不稳"
+              "（列名 = 滑动窗口条数 / year = 按自然年 / channel = 全频道单一中位数）：")
+        print(sens.sort_values("51", ascending=False).to_markdown())
+        print("\n六列同向才算稳。只在某几列偏离 1.0 的，是基线算法产物，别当结论。")
 
     path = os.path.join(DATA_DIR, "stats_by_group.csv")
     out.to_csv(path, encoding="utf-8-sig")
@@ -562,8 +594,12 @@ def main():
                        help="默认剔除 60 秒内的 Shorts，它们会把中位数带偏")
         p.add_argument("--min-age-days", type=int, default=30,
                        help="剔除发布不足这么多天的新片，它们播放量还没长完（默认 30）")
+        p.add_argument("--baseline", default="21", choices=BASELINES,
+                       help="相对指数拿什么当基线，数字是滑动窗口条数（默认 21）")
         if name == "stats":
             p.add_argument("--by-channel", action="store_true")
+            p.add_argument("--sensitivity", action="store_true",
+                           help="六种基线口径并排，看结论是不是算法产物")
         else:
             p.add_argument("--min-n", type=int, default=3, help="少于这个期数的关键词单独列，不参与四象限")
             p.add_argument("--top", type=int, default=15)
