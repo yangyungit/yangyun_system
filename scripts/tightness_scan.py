@@ -27,6 +27,7 @@ warnings.filterwarnings("ignore")
 
 NOTE = Path.home() / "yangyun/Code_Projects/obsidian_notes/99_Human_Zone/供给刚性清单.md"
 START, END = "<!-- TIGHTNESS:START -->", "<!-- TIGHTNESS:END -->"
+A_START, A_END = "<!-- ALERT:START -->", "<!-- ALERT:END -->"
 
 # 分位超过这个数就标紧
 TIGHT_Q = 0.85
@@ -53,16 +54,44 @@ FUTURES = {
     "棉花": "CT=F",
 }
 
-# 只对逐月都有活跃合约的品种算期限结构。玉米、铜这类只有特定交割月，
-# 自动推算月份会落到空合约上，所以不做
-TERM_ROOTS = {"原油": ("CL", "NYM"), "美国天然气": ("NG", "NYM")}
 MONTH_CODE = "FGHJKMNQUVXZ"
 
+# 期限结构：品类 -> (合约代号, 交易所后缀, 该品种有活跃合约的交割月代码)
+# 不同品种交割月不同，玉米只有 3/5/7/9/12 月，硬推月份会落到空合约上
+TERM = {
+    "原油": ("CL", "NYM", MONTH_CODE),
+    "布伦特": ("BZ", "NYM", MONTH_CODE),
+    "馏分油（柴油）": ("HO", "NYM", MONTH_CODE),
+    "汽油 RBOB": ("RB", "NYM", MONTH_CODE),
+    "美国天然气": ("NG", "NYM", MONTH_CODE),
+    "铜": ("HG", "CMX", "HKNUZ"),
+    "白银": ("SI", "CMX", "HKNUZ"),
+    "黄金": ("GC", "CMX", "GJMQVZ"),
+    "铂": ("PL", "NYM", "FJNV"),
+    "钯": ("PA", "NYM", "HMUZ"),
+    "铝": ("ALI", "CMX", "HMUZ"),
+    "玉米": ("ZC", "CBT", "HKNUZ"),
+    "小麦": ("ZW", "CBT", "HKNUZ"),
+    "大豆": ("ZS", "CBT", "FHKNQUX"),
+    "咖啡": ("KC", "NYB", "HKNUZ"),
+    "可可": ("CC", "NYB", "HKNUZ"),
+    "糖": ("SB", "NYB", "HKNV"),
+    "棉花": ("CT", "NYB", "HKNVZ"),
+}
 
-def contract_code(root: str, suffix: str, months_out: int) -> str:
-    m = date.today().month - 1 + months_out
-    y = date.today().year + m // 12
-    return f"{root}{MONTH_CODE[m % 12]}{y % 100:02d}.{suffix}"
+# 远月取 8-12 个月之后。太近会撞上近月合约本身，太远流动性差
+FAR_MIN, FAR_MAX = 8, 12
+
+
+def far_contract(root: str, suffix: str, months: str) -> str | None:
+    """找 8-12 个月后第一个该品种有活跃合约的交割月。"""
+    today = date.today()
+    for out in range(FAR_MIN, FAR_MAX + 1):
+        m = today.month - 1 + out
+        code = MONTH_CODE[m % 12]
+        if code in months:
+            return f"{root}{code}{(today.year + m // 12) % 100:02d}.{suffix}"
+    return None
 
 
 def close_series(ticker: str, period: str = "max") -> pd.Series | None:
@@ -105,23 +134,33 @@ def scan_one(item: tuple[str, str]) -> dict:
     if len(c) > 22 + 252 * 5:
         past = c.iloc[:-22]
         row["q5_prev"] = quantile_of(past, float(past.iloc[-1]), 5)
+    row["term"] = term_one(name)
     return row
 
 
-def term_structure() -> list[dict]:
-    out = []
-    for name, (root, suffix) in TERM_ROOTS.items():
-        spot = close_series(FUTURES[name], "1y")
-        if spot is None:
-            continue
-        legs = []
-        for months in (3, 9):
-            code = contract_code(root, suffix, months)
-            far = close_series(code, "6mo")
-            if far is not None:
-                legs.append((months, code, float(far.iloc[-1])))
-        if legs:
-            out.append({"name": name, "spot": float(spot.iloc[-1]), "legs": legs})
+def term_one(name: str) -> dict | None:
+    """算一个品类的近月对远月溢价。正值 = backwardation = 现货紧张。"""
+    if name not in TERM:
+        return None
+    root, suffix, months = TERM[name]
+    code = far_contract(root, suffix, months)
+    if code is None:
+        return None
+    near = close_series(FUTURES[name], "1y")
+    far = close_series(code, "6mo")
+    if near is None or far is None:
+        return None
+    n, f = float(near.iloc[-1]), float(far.iloc[-1])
+    # 价格完全相同说明 Yahoo 把连续合约映射到了同一张合约，不是真的平价
+    if f <= 0 or abs(n - f) < 1e-9:
+        return None
+    out = {"code": code, "near": n, "far": f, "prem": n / f - 1, "prem_prev": None}
+    # 一个月前的溢价：能看出在往 backwardation 走还是往 contango 走
+    both = pd.concat({"n": near, "f": far}, axis=1).dropna()
+    if len(both) > 23:
+        p = both.iloc[-23]
+        if p.f > 0:
+            out["prem_prev"] = p.n / p.f - 1
     return out
 
 
@@ -149,50 +188,84 @@ def qstr(v) -> str:
     return "—" if v is None or v != v else f"{v * 100:.0f}%"
 
 
-def render(rows: list[dict], terms: list[dict], crack: dict | None) -> str:
-    ok = [r for r in rows if r.get("ok")]
-    ok.sort(key=lambda r: (r["q5"] is None, -(r["q5"] or 0)))
-
-    out = [START, "", f"> 自动生成于 {date.today()}，由 `system/scripts/tightness_scan.py` 写入。", ""]
-    out.append("| 品类 | 最新 | 5 年分位 | 10 年分位 | 一个月前分位 | 近一月 | 近一年 | 判读 |")
-    out.append("|---|---:|---:|---:|---:|---:|---:|---|")
-    for r in ok:
-        q5 = r["q5"]
+def verdict_of(q5: float | None, prem: float | None) -> str:
+    """判读。价格分位测「贵不贵」，期限结构测「缺不缺」，两者经常分离。"""
+    if prem is None:
         if q5 is None:
-            verdict = "历史不足"
-        elif q5 >= TIGHT_Q:
-            verdict = "紧"
-        elif q5 <= 0.3:
-            verdict = "松"
-        else:
-            verdict = "中性"
-        prev = r.get("q5_prev")
+            return "数据不足"
+        return "价格高位（无期限结构）" if q5 >= TIGHT_Q else "中性（无期限结构）"
+    if prem > 0.05:
+        return "现货紧张" + ("，且价格在高位" if q5 is not None and q5 >= TIGHT_Q else "")
+    if prem > 0:
+        return "轻微倒挂"
+    if q5 is not None and q5 >= TIGHT_Q:
+        return "贵，但不缺"
+    if q5 is not None and q5 <= 0.3:
+        return "松"
+    return "中性"
+
+
+def build_alerts(rows: list[dict]) -> list[str]:
+    """报警建在紧度变化上，不是建在价格涨跌上。价格异动是结果，紧度异动才是提前量。"""
+    out = []
+    for r in rows:
+        if not r.get("ok"):
+            continue
+        name, q5, prev = r["name"], r["q5"], r.get("q5_prev")
+        t = r.get("term")
+        if t and t["prem_prev"] is not None:
+            p, pp = t["prem"], t["prem_prev"]
+            if p > 0 and pp <= 0:
+                out.append(f"**{name} 期限结构翻转成倒挂**（一个月前 {pp:+.1%} → 现在 {p:+.1%}）"
+                           "，市场开始为「立刻拿到货」付溢价，这是现货转紧最直接的信号")
+            elif p > 0.05 and p - pp > 0.05:
+                out.append(f"**{name} 倒挂加深**（{pp:+.1%} → {p:+.1%}），现货比一个月前更抢手")
+            elif pp > 0.05 and p < 0:
+                out.append(f"{name} 倒挂消失（{pp:+.1%} → {p:+.1%}），现货紧张在缓解")
         if q5 is not None and prev is not None:
-            verdict += "，在变紧" if q5 - prev > 0.1 else ("，在变松" if prev - q5 > 0.1 else "")
+            if q5 >= TIGHT_Q > prev:
+                out.append(f"{name} 价格进入 5 年 {TIGHT_Q:.0%} 分位以上（{qstr(prev)} → {qstr(q5)}）")
+            elif q5 - prev > 0.2:
+                out.append(f"{name} 价格分位一个月跳升 {(q5 - prev) * 100:.0f} 个百分点"
+                           f"（{qstr(prev)} → {qstr(q5)}）")
+    return out
+
+
+def render(rows: list[dict], crack: dict | None) -> str:
+    ok = [r for r in rows if r.get("ok")]
+    # 按真实紧度排序：有倒挂的排前面，其次看价格分位
+    ok.sort(key=lambda r: (-(r["term"]["prem"] if r.get("term") else -9), -(r["q5"] or 0)))
+
+    out = [START, "", f"> 自动生成于 {date.today()}，由 `system/scripts/tightness_scan.py` 写入。",
+           "> 判读以期限结构为主、价格分位为辅：分位高只说明贵，倒挂才说明缺。", ""]
+    out.append("| 品类 | 最新 | 近月溢价 | 一月前溢价 | 5 年分位 | 一月前分位 | 近一月 | 近一年 | 判读 |")
+    out.append("|---|---:|---:|---:|---:|---:|---:|---:|---|")
+    for r in ok:
+        t = r.get("term")
+        prem = t["prem"] if t else None
         out.append(
-            f"| {r['name']} | {r['price']:.2f} | {qstr(q5)} | {qstr(r['q10'])} | "
-            f"{qstr(prev)} | {pct(r['r1m'])} | {pct(r['r1y'])} | {verdict} |"
+            f"| {r['name']} | {r['price']:.2f} | {pct(prem, 1)} | "
+            f"{pct(t['prem_prev'], 1) if t else '—'} | {qstr(r['q5'])} | {qstr(r.get('q5_prev'))} | "
+            f"{pct(r['r1m'])} | {pct(r['r1y'])} | {verdict_of(r['q5'], prem)} |"
         )
+
+    out += ["", "天然气有强季节性（冬季合约天然贵过夏季），它的近月溢价要跟往年同月比才有意义，"
+            "不能直接当宽松读。原油和金属没有这个问题。"]
 
     if crack:
         out += ["", "**炼能紧张（3-2-1 裂解价差）**", "",
                 f"当前 {crack['value']:.1f} 美元/桶，10 年中位 {crack['median10']:.1f}，"
-                f"5 年分位 {qstr(crack['q5'])}，10 年分位 {qstr(crack['q10'])}。"]
+                f"5 年分位 {qstr(crack['q5'])}，10 年分位 {qstr(crack['q10'])}。",
+                "", "注意裂解价差和柴油价格是两件事：炼油厂赚的是价差，原油涨得比油品快的时候，"
+                "柴油越贵炼厂反而越不赚钱。要区分「炼能端缺口」（炼厂着火、出口禁令，价差扩大）"
+                "和「原油端缺口」（地缘冲突，价差被压缩）。"]
 
-    if terms:
-        out += ["", "**期限结构**（近月溢价为正 = backwardation = 现货紧张）", "",
-                "| 品类 | 近月 | 远月 | 远月价 | 近月溢价 |", "|---|---:|---|---:|---:|"]
-        for t in terms:
-            for months, code, price in t["legs"]:
-                out.append(f"| {t['name']} | {t['spot']:.2f} | {months} 个月后 `{code}` | "
-                           f"{price:.2f} | {t['spot'] / price - 1:+.1%} |")
-        out += ["", "天然气有强季节性（冬季合约天然贵过夏季），它的近月溢价要跟往年同月比才有意义，"
-                "不能直接当宽松读。原油没有这个问题。"]
-
-    tight = [r["name"] for r in ok if r["q5"] is not None and r["q5"] >= TIGHT_Q]
+    tight = [r["name"] for r in ok if r.get("term") and r["term"]["prem"] > 0]
     if tight:
-        out += ["", f"**当前处在 5 年 {TIGHT_Q:.0%} 分位以上的品类**：{'、'.join(tight)}。"
-                "事件真打在这些品类上才容易出非线性行情。"]
+        out += ["", f"**当前处在倒挂（现货紧张）的品类**：{'、'.join(tight)}。"
+                "事件打在这些品类上才容易出非线性行情。"]
+    else:
+        out += ["", "**当前没有任何品类处在倒挂状态**，全部 contango。"]
 
     bad = [r["ticker"] for r in rows if not r.get("ok")]
     if bad:
@@ -202,29 +275,50 @@ def render(rows: list[dict], terms: list[dict], crack: dict | None) -> str:
     return "\n".join(out)
 
 
+def render_alerts(alerts: list[str]) -> str:
+    out = [A_START, ""]
+    if alerts:
+        out.append(f"> {date.today()} 扫出 {len(alerts)} 条紧度变化：")
+        out.append("")
+        out += [f"- {a}" for a in alerts]
+    else:
+        out.append(f"> {date.today()}：没有紧度异动。")
+    out += ["", A_END]
+    return "\n".join(out)
+
+
+def replace_block(text: str, start: str, end: str, body: str) -> str:
+    return text.split(start)[0] + body + text.split(end)[1]
+
+
 def main() -> int:
     if not NOTE.exists():
         print(f"找不到笔记：{NOTE}", file=sys.stderr)
         return 1
     text = NOTE.read_text(encoding="utf-8")
-    if START not in text or END not in text:
-        print("笔记里缺少 TIGHTNESS 标记，不敢写", file=sys.stderr)
-        return 1
+    for mark in (START, END, A_START, A_END):
+        if mark not in text:
+            print(f"笔记里缺少标记 {mark}，不敢写", file=sys.stderr)
+            return 1
 
     print(f"扫 {len(FUTURES)} 个品类…")
     with ThreadPoolExecutor(max_workers=6) as ex:
         rows = list(ex.map(scan_one, FUTURES.items()))
-    terms = term_structure()
     crack = crack_321()
+    alerts = build_alerts(rows)
 
-    NOTE.write_text(text.split(START)[0] + render(rows, terms, crack) + text.split(END)[1],
-                    encoding="utf-8")
+    text = replace_block(text, START, END, render(rows, crack))
+    text = replace_block(text, A_START, A_END, render_alerts(alerts))
+    NOTE.write_text(text, encoding="utf-8")
 
     ok = [r for r in rows if r.get("ok")]
-    tight = [r for r in ok if r["q5"] is not None and r["q5"] >= TIGHT_Q]
-    print(f"写入完成：{len(ok)}/{len(rows)} 个品类有数据，处在 {TIGHT_Q:.0%} 分位以上的 {len(tight)} 个")
-    for r in sorted(tight, key=lambda x: -x["q5"]):
-        print(f"  紧  {r['name']}  5年分位 {qstr(r['q5'])}  近一年 {pct(r['r1y'])}")
+    back = [r for r in ok if r.get("term") and r["term"]["prem"] > 0]
+    print(f"写入完成：{len(ok)}/{len(rows)} 个品类有数据，处在倒挂（现货紧张）的 {len(back)} 个")
+    for r in sorted(back, key=lambda x: -x["term"]["prem"]):
+        print(f"  倒挂 {r['name']}  近月溢价 {r['term']['prem']:+.1%}  5年分位 {qstr(r['q5'])}")
+    print(f"报警 {len(alerts)} 条：")
+    for a in alerts:
+        print("  -", a.replace("**", ""))
     return 0
 
 
