@@ -24,6 +24,9 @@ import pandas as pd
 import requests
 import yfinance as yf
 
+sys.path.insert(0, str(Path.home() / "yangyun/Code_Projects/valuation-radar"))
+from rigid_list import RIGID, proxy_categories  # noqa: E402
+
 warnings.filterwarnings("ignore")
 
 NOTE = Path.home() / "yangyun/Code_Projects/obsidian_notes/99_Human_Zone/供给刚性清单.md"
@@ -39,6 +42,13 @@ COOLDOWN_DAYS = 30
 
 # 分位超过这个数就标紧
 TIGHT_Q = 0.85
+
+# 代理读数的异动线。BWET 那波 2025-08 起月线 +14%/+17%/+22%/+28%，20% 会在第三个月
+# 触发，比主理人 2026-09 才注意到早约 11 个月——这就是这个数的依据
+PROXY_JUMP = 0.20
+
+PROXY_WORDING = ("代理读数——这是载体自己的涨幅和分位，不是现货紧度。"
+                 "运费的真紧度要去 Baltic Exchange 查 TD3C。")
 
 # 品类 -> 连续合约。对应第二节的品类名
 FUTURES = {
@@ -143,7 +153,29 @@ def scan_one(item: tuple[str, str]) -> dict:
         past = c.iloc[:-22]
         row["q5_prev"] = quantile_of(past, float(past.iloc[-1]), 5)
     row["term"] = term_one(name)
+    row["source"] = "futures"
     return row
+
+
+def scan_proxy(item: tuple[str, str]) -> dict:
+    """没有活跃美股期货的品类，用主载体自身的价格算一份代理读数。
+
+    期限结构一律留空——载体股价算不出现货对远月的溢价，硬填就是拿别的东西充数。
+    """
+    name, ticker = item
+    c = close_series(ticker)
+    if c is None:
+        return {"name": name, "ticker": ticker, "ok": False, "source": "proxy"}
+    cur = float(c.iloc[-1])
+    return {
+        "name": name, "ticker": ticker, "ok": True, "price": cur, "source": "proxy",
+        "q5": quantile_of(c, cur, 5),
+        "q10": quantile_of(c, cur, 10),
+        "r1m": cur / c.iloc[-22] - 1 if len(c) > 22 else None,
+        "r1y": cur / c.iloc[-253] - 1 if len(c) > 253 else None,
+        "stale": (pd.Timestamp(date.today()) - c.index[-1]).days,
+        "term": None,
+    }
 
 
 def term_one(name: str) -> dict | None:
@@ -223,7 +255,9 @@ def snapshot_row(r: dict) -> dict:
         "far_code": t["code"] if t else None,
         "q5": r["q5"], "q5_prev": r.get("q5_prev"), "q10": r["q10"],
         "r1m": r["r1m"], "r1y": r["r1y"],
-        "verdict": verdict_of(r["q5"], t["prem"] if t else None),
+        "verdict": PROXY_WORDING if r.get("source") == "proxy"
+                   else verdict_of(r["q5"], t["prem"] if t else None),
+        "source": r.get("source", "futures"),
     }
 
 
@@ -240,6 +274,15 @@ def build_alerts(rows: list[dict]) -> list[dict]:
 
     for r in rows:
         if not r.get("ok"):
+            continue
+        # 代理行只报涨幅异动：载体自己的 5 年分位跟现货紧度没关系，BWET 涨了 47 倍之后
+        # 分位恒等于 100%，拿它当紧度会天天误报
+        if r.get("source") == "proxy":
+            if r.get("r1m") is not None and r["r1m"] > PROXY_JUMP:
+                ind = RIGID.get(r["name"], {}).get("indicator", "行业现货价")
+                add(r["name"], "代理载体异动",
+                    f"{r['name']} 主载体 {r['ticker']} 近一月 {r['r1m']:+.0%}，"
+                    f"去查 {ind} 确认是不是真紧")
             continue
         name, q5, prev = r["name"], r["q5"], r.get("q5_prev")
         t = r.get("term")
@@ -267,7 +310,8 @@ def build_alerts(rows: list[dict]) -> list[dict]:
 
 
 def render(rows: list[dict], crack: dict | None) -> str:
-    ok = [r for r in rows if r.get("ok")]
+    ok = [r for r in rows if r.get("ok") and r.get("source") != "proxy"]
+    proxies = [r for r in rows if r.get("ok") and r.get("source") == "proxy"]
     # 按真实紧度排序：有倒挂的排前面，其次看价格分位
     ok.sort(key=lambda r: (-(r["term"]["prem"] if r.get("term") else -9), -(r["q5"] or 0)))
 
@@ -286,6 +330,15 @@ def render(rows: list[dict], crack: dict | None) -> str:
 
     out += ["", "天然气有强季节性（冬季合约天然贵过夏季），它的近月溢价要跟往年同月比才有意义，"
             "不能直接当宽松读。原油和金属没有这个问题。"]
+
+    if proxies:
+        proxies.sort(key=lambda r: -(r["r1m"] or -9))
+        out += ["", "**没有期货读数的品类（代理读数）**", "", f"{PROXY_WORDING}", "",
+                "| 品类 | 主载体 | 最新 | 5 年分位 | 近一月 | 近一年 |",
+                "|---|---|---:|---:|---:|---:|"]
+        for r in proxies:
+            out.append(f"| {r['name']} | `{r['ticker']}` | {r['price']:.2f} | "
+                       f"{qstr(r['q5'])} | {pct(r['r1m'])} | {pct(r['r1y'])} |")
 
     if crack:
         out += ["", "**炼能紧张（3-2-1 裂解价差）**", "",
@@ -432,9 +485,11 @@ def main() -> int:
             print(f"笔记里缺少标记 {mark}，不敢写", file=sys.stderr)
             return 1
 
-    print(f"扫 {len(FUTURES)} 个品类…")
+    proxies = proxy_categories()
+    print(f"扫 {len(FUTURES)} 个有期货的品类 + {len(proxies)} 个代理读数品类…")
     with ThreadPoolExecutor(max_workers=6) as ex:
         rows = list(ex.map(scan_one, FUTURES.items()))
+        rows += list(ex.map(scan_proxy, proxies.items()))
     crack = crack_321()
     alerts = build_alerts(rows)
 
@@ -444,7 +499,9 @@ def main() -> int:
 
     ok = [r for r in rows if r.get("ok")]
     back = [r for r in ok if r.get("term") and r["term"]["prem"] > 0]
-    print(f"写入完成：{len(ok)}/{len(rows)} 个品类有数据，处在倒挂（现货紧张）的 {len(back)} 个")
+    npx = sum(1 for r in ok if r.get("source") == "proxy")
+    print(f"写入完成：{len(ok)}/{len(rows)} 个品类有数据（其中代理读数 {npx} 个），"
+          f"处在倒挂（现货紧张）的 {len(back)} 个")
     for r in sorted(back, key=lambda x: -x["term"]["prem"]):
         print(f"  倒挂 {r['name']}  近月溢价 {r['term']['prem']:+.1%}  5年分位 {qstr(r['q5'])}")
     print(f"报警 {len(alerts)} 条：")

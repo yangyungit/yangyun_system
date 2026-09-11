@@ -30,7 +30,10 @@ EVENTS = [
         "name": "沙特 Abqaiq 油田遇袭",
         "date": "2019-09-14",
         "note": "一次性中断全球约 5% 原油供给",
-        "categories": "原油、成品油轮、战争险",
+        "categories": ["原油", "成品油轮 MR/LR2", "战争险与再保险费率"],
+        "stage_hit": "采",
+        "stage_note": "炸的是产能，但 OPEC 闲置产能顶上了，油价只给一次脉冲"
+                      "（`CL=F` T+120 超额 -35.2%）；钱在运力侧（`INSW` T+60 +41.3%）",
         "tickers": ["CL=F", "BZ=F", "USO", "XLE", "VLO", "MPC",
                     "STNG", "FRO", "INSW", "DHT", "RNR", "EG"],
     },
@@ -39,7 +42,9 @@ EVENTS = [
         "name": "苏伊士运河长赐号搁浅",
         "date": "2021-03-23",
         "note": "堵塞六天",
-        "categories": "集装箱运费、成品油轮、干散货",
+        "categories": ["集装箱运费", "成品油轮 MR/LR2", "干散货运费"],
+        "stage_hit": "运",
+        "stage_note": "货没少，航线堵了",
         "tickers": ["ZIM", "MATX", "BDRY", "STNG", "FRO", "GNK", "SBLK", "CL=F"],
     },
     {
@@ -47,7 +52,11 @@ EVENTS = [
         "name": "俄乌战争爆发",
         "date": "2022-02-24",
         "note": "",
-        "categories": "VLCC 油轮运费、成品油轮、钾肥、铝、谷物、天然气、铀浓缩",
+        "categories": ["VLCC 原油油轮运费", "成品油轮 MR/LR2", "钾肥与化肥", "铝",
+                       "谷物", "美国天然气", "铀浓缩与转化 SWU"],
+        "stage_hit": "采 + 运",
+        "stage_note": "制裁同时切断产能和航线，所以是唯一一个「几乎每个品类都兑现」的事件"
+                      "（21 个候选 16 个超额 >15%）",
         "tickers": ["FRO", "STNG", "TRMD", "INSW", "MOS", "NTR", "CF", "IPI",
                     "AA", "CENX", "ZW=F", "ZC=F", "WEAT", "CORN", "NG=F",
                     "UNG", "LEU", "CCJ", "URA", "HO=F", "CL=F"],
@@ -57,7 +66,9 @@ EVENTS = [
         "name": "缅甸佤邦宣布 8 月起停止锡矿开采",
         "date": "2023-04-15",
         "note": "公告在 2023 年 4 月中",
-        "categories": "锡",
+        "categories": ["锡"],
+        "stage_hit": "采",
+        "stage_note": "判断对了但没有能买的东西，4 个候选 0 个 >15%",
         "tickers": ["JJT", "TINY", "AFMJF", "MSB.AX"],
     },
     {
@@ -65,7 +76,9 @@ EVENTS = [
         "name": "胡塞武装开始袭击红海商船",
         "date": "2023-11-19",
         "note": "",
-        "categories": "集装箱运费、成品油轮、战争险",
+        "categories": ["集装箱运费", "成品油轮 MR/LR2", "战争险与再保险费率"],
+        "stage_hit": "运",
+        "stage_note": "卡航线不卡货，运费 ETF 赢、航运股没赢",
         "tickers": ["ZIM", "MATX", "STNG", "TRMD", "FRO", "INSW",
                     "RNR", "EG", "ACGL", "BDRY"],
     },
@@ -385,7 +398,8 @@ def write_report(df, failed):
     for ev in EVENTS:
         A(f"### {ev['id']}　{ev['name']}（{ev['date']}"
           + (f"，{ev['note']}" if ev["note"] else "") + "）\n")
-        A(f"清单对应品类：{ev['categories']}\n")
+        A(f"清单对应品类：{'、'.join(ev['categories'])}　"
+          f"卡的是「{ev['stage_hit']}」——{ev['stage_note']}\n")
         A(event_table(d, ev["id"]) + "\n")
         if ev["id"] == "E4":
             A("> 注：`TINY` 与 `MSB.AX` 经核对与锡无关（分别是纳米技术 ETF 和生物科技公司），"
