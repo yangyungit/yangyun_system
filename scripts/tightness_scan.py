@@ -14,10 +14,12 @@
 """
 
 import json
+import re
+import sqlite3
 import sys
 import warnings
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -25,7 +27,7 @@ import requests
 import yfinance as yf
 
 sys.path.insert(0, str(Path.home() / "yangyun/Code_Projects/valuation-radar"))
-from rigid_list import RIGID, proxy_categories  # noqa: E402
+from rigid_list import RIGID, news_terms_of, proxy_categories  # noqa: E402
 
 warnings.filterwarnings("ignore")
 
@@ -49,6 +51,13 @@ PROXY_JUMP = 0.20
 
 PROXY_WORDING = ("代理读数——这是载体自己的涨幅和分位，不是现货紧度。"
                  "运费的真紧度要去 Baltic Exchange 查 TD3C。")
+
+# 报警只说「紧度翻转了」，不说为什么翻。新闻库补上这一句
+NEWS_DB = Path.home() / "yangyun/Code_Projects/valuation-radar/data/narrative.db"
+NEWS_LOOKBACK_DAYS = 7
+NEWS_PER_ALERT = 3
+NEWS_HEADLINE_MAX = 120
+NO_NEWS = "没找到对得上的新闻"
 
 # 品类 -> 连续合约。对应第二节的品类名
 FUTURES = {
@@ -443,6 +452,84 @@ def unseen(alerts: list[dict]) -> list[dict]:
     return fresh
 
 
+def match_words(low: str, kw: str) -> bool:
+    """检索词里每个词都要在标题里整词出现，顺序不管。
+
+    整词是关键：子串匹配下 tin 命中 prin(tin)g、gold 命中 goldman、unica 命中
+    comm(unica)tions、wave 命中 heat(wave)，整页噪音就是这么来的。
+    """
+    return all(re.search(rf"\b{re.escape(w)}\b", low) for w in kw.split())
+
+
+def why_news(name: str, on: date | None = None) -> list[tuple[str, str]]:
+    """报警日往前 NEWS_LOOKBACK_DAYS 天该品类的新闻，最多 NEWS_PER_ALERT 条。
+
+    daily_news 是英文的 google RSS 加 gdelt，所以用 rigid_list 的 keywords_en 命中、
+    exclude_en 淘汰。这两道网都要：单词级的商品名歧义极大，搜 sugar 会拉回化妆品
+    公司融资、糖厂铜失窃、含糖饮料禁令。
+
+    查不到、库不在、SQL 炸了都返回空表——上层照常推报警，只是不带「为什么」。
+    """
+    kw, ex = news_terms_of(name)
+    if not kw or not NEWS_DB.exists():
+        return []
+    end = on or date.today()
+    start = end - timedelta(days=NEWS_LOOKBACK_DAYS)
+    # SQL 只做粗筛：每个检索词挑最长的那个词去 LIKE。一个检索词要求所有词都出现，
+    # 所以「含最长的词」必然是「全都含」的超集，粗筛不会漏掉真命中。
+    # 7 天窗口有 6 万多条，不粗筛就得把它们全捞到 Python 里
+    probes = sorted({max(k.split(), key=len) for k in kw})
+    where = " OR ".join(["lower(headline) LIKE ?"] * len(probes))
+    try:
+        with sqlite3.connect(f"file:{NEWS_DB}?mode=ro", uri=True, timeout=15) as db:
+            hits = db.execute(
+                "SELECT fetch_date, headline FROM daily_news "
+                f"WHERE fetch_date BETWEEN ? AND ? AND ({where}) "
+                "ORDER BY fetch_date DESC",
+                [start.isoformat(), end.isoformat(), *(f"%{p}%" for p in probes)],
+            ).fetchall()
+    except Exception:
+        return []
+
+    out, seen = [], set()
+    for d, headline in hits:
+        # 标题里的弯引号要拉平成直的，不然排除词 "cushing's" 对不上 Cushing’s
+        # 综合征、检索词 "cote d'ivoire" 对不上 Côte d’Ivoire
+        low = headline.lower().replace("\u2019", "'").replace("\u2018", "'")
+        if any(x in low for x in ex):
+            continue
+        if not any(match_words(low, k) for k in kw):
+            continue
+        # 同一条新闻常同时进 google_rss 和 gdelt，标题略有差别，按前缀去重
+        if low[:50] in seen:
+            continue
+        seen.add(low[:50])
+        h = headline.strip()
+        if len(h) > NEWS_HEADLINE_MAX:
+            h = h[:NEWS_HEADLINE_MAX - 1] + "…"
+        out.append((str(d)[:10], h))
+        if len(out) >= NEWS_PER_ALERT:
+            break
+    return out
+
+
+def chunk_lines(lines: list[str], limit: int = 1900) -> list[str]:
+    """按行装箱。带上新闻之后正文轻易超过 Discord 的 2000 字上限，
+    原来那种一刀切到 1900 会把后面的报警整条吃掉，改成分几条发。"""
+    out, cur = [], ""
+    for ln in lines:
+        if len(ln) > limit:
+            ln = ln[:limit - 1] + "…"
+        if cur and len(cur) + 1 + len(ln) > limit:
+            out.append(cur)
+            cur = ln
+        else:
+            cur = f"{cur}\n{ln}" if cur else ln
+    if cur:
+        out.append(cur)
+    return out
+
+
 def notify(alerts: list[dict], rows: list[dict]) -> str:
     """推 Discord。推送失败不影响写笔记这个主要功能。"""
     if not alerts:
@@ -454,21 +541,24 @@ def notify(alerts: list[dict], rows: list[dict]) -> str:
     back = sorted([r for r in rows if r.get("ok") and r.get("term") and r["term"]["prem"] > 0],
                   key=lambda r: -r["term"]["prem"])
     lines = [f"**供给刚性清单 · 紧度报警**　{date.today()}", ""]
-    lines += [f"- {a['text']}" for a in alerts]
+    for a in alerts:
+        lines.append(f"- {a['text']}")
+        news = why_news(a["key"].split("|")[0])
+        lines += [f"　　· {d}　{h}" for d, h in news] if news else [f"　　· {NO_NEWS}"]
     if back:
         lines += ["", "当前处在倒挂（现货紧张）的品类："]
         lines.append("　" + "、".join(f"{r['name']} {r['term']['prem']:+.1%}" for r in back))
-    body = "\n".join(lines)
-    if len(body) > 1900:
-        body = body[:1900] + "\n…（截断，详见笔记）"
 
-    try:
-        r = requests.post(url, json={"content": body}, timeout=20)
-        if r.status_code in (200, 204):
-            return f"已推送 {len(alerts)} 条到 Discord"
-        return f"推送失败 HTTP {r.status_code}：{r.text[:200]}"
-    except Exception as exc:
-        return f"推送失败 {type(exc).__name__}：{exc}"
+    sent = 0
+    for body in chunk_lines(lines):
+        try:
+            r = requests.post(url, json={"content": body}, timeout=20)
+            if r.status_code not in (200, 204):
+                return f"推送失败 HTTP {r.status_code}：{r.text[:200]}（已发 {sent} 条）"
+            sent += 1
+        except Exception as exc:
+            return f"推送失败 {type(exc).__name__}：{exc}（已发 {sent} 条）"
+    return f"已推送 {len(alerts)} 条报警到 Discord（分 {sent} 条消息）"
 
 
 def replace_block(text: str, start: str, end: str, body: str) -> str:
