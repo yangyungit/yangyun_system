@@ -27,6 +27,9 @@ import yfinance as yf
 warnings.filterwarnings("ignore")
 
 NOTE = Path.home() / "yangyun/Code_Projects/obsidian_notes/99_Human_Zone/供给刚性清单.md"
+
+# 量化系统后端，存每日快照供前端画时间序列
+API = "http://127.0.0.1:8000"
 START, END = "<!-- TIGHTNESS:START -->", "<!-- TIGHTNESS:END -->"
 A_START, A_END = "<!-- ALERT:START -->", "<!-- ALERT:END -->"
 
@@ -88,14 +91,14 @@ TERM = {
 FAR_MIN, FAR_MAX = 8, 12
 
 
-def far_contract(root: str, suffix: str, months: str) -> str | None:
-    """找 8-12 个月后第一个该品种有活跃合约的交割月。"""
-    today = date.today()
+def far_contract(root: str, suffix: str, months: str, on: date | None = None) -> str | None:
+    """找 8-12 个月后第一个该品种有活跃合约的交割月。on 用于回填历史某天。"""
+    on = on or date.today()
     for out in range(FAR_MIN, FAR_MAX + 1):
-        m = today.month - 1 + out
+        m = on.month - 1 + out
         code = MONTH_CODE[m % 12]
         if code in months:
-            return f"{root}{code}{(today.year + m // 12) % 100:02d}.{suffix}"
+            return f"{root}{code}{(on.year + m // 12) % 100:02d}.{suffix}"
     return None
 
 
@@ -210,6 +213,20 @@ def verdict_of(q5: float | None, prem: float | None) -> str:
     return "中性"
 
 
+def snapshot_row(r: dict) -> dict:
+    """一行扫描结果 → 后端 tightness_daily 的一行。"""
+    t = r.get("term")
+    return {
+        "category": r["name"], "ticker": r["ticker"], "price": r["price"],
+        "prem": t["prem"] if t else None,
+        "prem_prev": t["prem_prev"] if t else None,
+        "far_code": t["code"] if t else None,
+        "q5": r["q5"], "q5_prev": r.get("q5_prev"), "q10": r["q10"],
+        "r1m": r["r1m"], "r1y": r["r1y"],
+        "verdict": verdict_of(r["q5"], t["prem"] if t else None),
+    }
+
+
 def build_alerts(rows: list[dict]) -> list[dict]:
     """报警建在紧度变化上，不是建在价格涨跌上。价格异动是结果，紧度异动才是提前量。
 
@@ -305,16 +322,45 @@ def render_alerts(alerts: list[dict]) -> str:
     return "\n".join(out)
 
 
-def load_webhook() -> str | None:
-    """launchd 不加载 .env，脚本自己读工作区根的 .env。"""
-    env = Path.home() / "yangyun/Code_Projects/.env"
-    if not env.exists():
+def read_env(path: Path, key: str) -> str | None:
+    """launchd 不加载 .env，脚本自己读。"""
+    if not path.exists():
         return None
-    for line in env.read_text(encoding="utf-8").splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
-        if line.startswith("DISCORD_WEBHOOK_TIGHTNESS="):
+        if line.startswith(f"{key}="):
             return line.split("=", 1)[1].strip() or None
     return None
+
+
+def load_webhook() -> str | None:
+    return read_env(Path.home() / "yangyun/Code_Projects/.env", "DISCORD_WEBHOOK_TIGHTNESS")
+
+
+def push_backend(rows: list[dict], alerts: list[dict]) -> str:
+    """把当天快照推给量化系统后端存档，供前端画时间序列。
+
+    后端不在线只打日志，不能让写 md 失败——md 那份是主理人的存档，优先级更高。
+    """
+    token = read_env(Path.home() / "yangyun/Code_Projects/valuation-radar/.env",
+                     "RESONANCE_INTERNAL_TOKEN")
+    if not token:
+        return "valuation-radar/.env 里没有 RESONANCE_INTERNAL_TOKEN，跳过上报"
+    payload = {
+        "snap_date": date.today().isoformat(),
+        "rows": [snapshot_row(r) for r in rows if r.get("ok")],
+        "alerts": [{"category": a["key"].split("|")[0], "kind": a["key"].split("|")[1],
+                    "text": a["text"].replace("**", "")} for a in alerts],
+    }
+    try:
+        r = requests.post(f"{API}/api/v1/tightness/ingest", json=payload,
+                          headers={"X-Internal-Token": token}, timeout=30)
+        if r.status_code == 200:
+            d = r.json()
+            return f"已上报后端：{d.get('rows')} 个品类、{d.get('alerts')} 条报警"
+        return f"上报后端失败 HTTP {r.status_code}：{r.text[:200]}"
+    except Exception as exc:
+        return f"上报后端失败 {type(exc).__name__}：{exc}"
 
 
 def unseen(alerts: list[dict]) -> list[dict]:
@@ -404,7 +450,9 @@ def main() -> int:
     print(f"报警 {len(alerts)} 条：")
     for a in alerts:
         print("  -", a["text"].replace("**", ""))
-    print(notify(unseen(alerts), rows))
+    fresh = unseen(alerts)
+    print(notify(fresh, rows))
+    print(push_backend(rows, fresh))
     return 0
 
 
