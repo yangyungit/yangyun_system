@@ -13,7 +13,7 @@
 真正的库存和日租金数据（LME 库存、TD3C 日租金、UxC 铀价）都要付费，拿不到。
 """
 
-import re
+import json
 import sys
 import warnings
 from concurrent.futures import ThreadPoolExecutor
@@ -21,6 +21,7 @@ from datetime import date
 from pathlib import Path
 
 import pandas as pd
+import requests
 import yfinance as yf
 
 warnings.filterwarnings("ignore")
@@ -28,6 +29,10 @@ warnings.filterwarnings("ignore")
 NOTE = Path.home() / "yangyun/Code_Projects/obsidian_notes/99_Human_Zone/供给刚性清单.md"
 START, END = "<!-- TIGHTNESS:START -->", "<!-- TIGHTNESS:END -->"
 A_START, A_END = "<!-- ALERT:START -->", "<!-- ALERT:END -->"
+
+# 已推送报警的记录，用于跨天去重
+STATE = Path(__file__).with_name("tightness_alert_state.json")
+COOLDOWN_DAYS = 30
 
 # 分位超过这个数就标紧
 TIGHT_Q = 0.85
@@ -205,9 +210,17 @@ def verdict_of(q5: float | None, prem: float | None) -> str:
     return "中性"
 
 
-def build_alerts(rows: list[dict]) -> list[str]:
-    """报警建在紧度变化上，不是建在价格涨跌上。价格异动是结果，紧度异动才是提前量。"""
+def build_alerts(rows: list[dict]) -> list[dict]:
+    """报警建在紧度变化上，不是建在价格涨跌上。价格异动是结果，紧度异动才是提前量。
+
+    每条带一个 key（品类 + 报警类型，不含具体数字），用于跨天去重：翻转类信号的
+    判断基准是一个月前，翻转后一个月内每天都会命中，不去重会天天推同一条。
+    """
     out = []
+
+    def add(name: str, kind: str, text: str):
+        out.append({"key": f"{name}|{kind}", "text": text})
+
     for r in rows:
         if not r.get("ok"):
             continue
@@ -216,18 +229,23 @@ def build_alerts(rows: list[dict]) -> list[str]:
         if t and t["prem_prev"] is not None:
             p, pp = t["prem"], t["prem_prev"]
             if p > 0 and pp <= 0:
-                out.append(f"**{name} 期限结构翻转成倒挂**（一个月前 {pp:+.1%} → 现在 {p:+.1%}）"
-                           "，市场开始为「立刻拿到货」付溢价，这是现货转紧最直接的信号")
+                add(name, "翻转倒挂",
+                    f"**{name} 期限结构翻转成倒挂**（一个月前 {pp:+.1%} → 现在 {p:+.1%}）"
+                    "，市场开始为「立刻拿到货」付溢价，这是现货转紧最直接的信号")
             elif p > 0.05 and p - pp > 0.05:
-                out.append(f"**{name} 倒挂加深**（{pp:+.1%} → {p:+.1%}），现货比一个月前更抢手")
+                add(name, "倒挂加深",
+                    f"**{name} 倒挂加深**（{pp:+.1%} → {p:+.1%}），现货比一个月前更抢手")
             elif pp > 0.05 and p < 0:
-                out.append(f"{name} 倒挂消失（{pp:+.1%} → {p:+.1%}），现货紧张在缓解")
+                add(name, "倒挂消失",
+                    f"{name} 倒挂消失（{pp:+.1%} → {p:+.1%}），现货紧张在缓解")
         if q5 is not None and prev is not None:
             if q5 >= TIGHT_Q > prev:
-                out.append(f"{name} 价格进入 5 年 {TIGHT_Q:.0%} 分位以上（{qstr(prev)} → {qstr(q5)}）")
+                add(name, "进入紧张区",
+                    f"{name} 价格进入 5 年 {TIGHT_Q:.0%} 分位以上（{qstr(prev)} → {qstr(q5)}）")
             elif q5 - prev > 0.2:
-                out.append(f"{name} 价格分位一个月跳升 {(q5 - prev) * 100:.0f} 个百分点"
-                           f"（{qstr(prev)} → {qstr(q5)}）")
+                add(name, "分位跳升",
+                    f"{name} 价格分位一个月跳升 {(q5 - prev) * 100:.0f} 个百分点"
+                    f"（{qstr(prev)} → {qstr(q5)}）")
     return out
 
 
@@ -275,16 +293,83 @@ def render(rows: list[dict], crack: dict | None) -> str:
     return "\n".join(out)
 
 
-def render_alerts(alerts: list[str]) -> str:
+def render_alerts(alerts: list[dict]) -> str:
     out = [A_START, ""]
     if alerts:
         out.append(f"> {date.today()} 扫出 {len(alerts)} 条紧度变化：")
         out.append("")
-        out += [f"- {a}" for a in alerts]
+        out += [f"- {a['text']}" for a in alerts]
     else:
         out.append(f"> {date.today()}：没有紧度异动。")
     out += ["", A_END]
     return "\n".join(out)
+
+
+def load_webhook() -> str | None:
+    """launchd 不加载 .env，脚本自己读工作区根的 .env。"""
+    env = Path.home() / "yangyun/Code_Projects/.env"
+    if not env.exists():
+        return None
+    for line in env.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line.startswith("DISCORD_WEBHOOK_TIGHTNESS="):
+            return line.split("=", 1)[1].strip() or None
+    return None
+
+
+def unseen(alerts: list[dict]) -> list[dict]:
+    """过滤掉 COOLDOWN_DAYS 内已推送过的同类报警。"""
+    today = date.today()
+    state = {}
+    if STATE.exists():
+        try:
+            state = json.loads(STATE.read_text(encoding="utf-8"))
+        except Exception:
+            state = {}
+    fresh = []
+    for a in alerts:
+        last = state.get(a["key"])
+        if last:
+            try:
+                if (today - date.fromisoformat(last)).days < COOLDOWN_DAYS:
+                    continue
+            except ValueError:
+                pass
+        fresh.append(a)
+        state[a["key"]] = today.isoformat()
+    # 清掉很久以前的记录，别让文件无限长
+    state = {k: v for k, v in state.items()
+             if (today - date.fromisoformat(v)).days < COOLDOWN_DAYS * 4}
+    STATE.write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
+    return fresh
+
+
+def notify(alerts: list[dict], rows: list[dict]) -> str:
+    """推 Discord。推送失败不影响写笔记这个主要功能。"""
+    if not alerts:
+        return "无新报警，不推送"
+    url = load_webhook()
+    if not url:
+        return "根 .env 里没有 DISCORD_WEBHOOK_TIGHTNESS，跳过推送"
+
+    back = sorted([r for r in rows if r.get("ok") and r.get("term") and r["term"]["prem"] > 0],
+                  key=lambda r: -r["term"]["prem"])
+    lines = [f"**供给刚性清单 · 紧度报警**　{date.today()}", ""]
+    lines += [f"- {a['text']}" for a in alerts]
+    if back:
+        lines += ["", "当前处在倒挂（现货紧张）的品类："]
+        lines.append("　" + "、".join(f"{r['name']} {r['term']['prem']:+.1%}" for r in back))
+    body = "\n".join(lines)
+    if len(body) > 1900:
+        body = body[:1900] + "\n…（截断，详见笔记）"
+
+    try:
+        r = requests.post(url, json={"content": body}, timeout=20)
+        if r.status_code in (200, 204):
+            return f"已推送 {len(alerts)} 条到 Discord"
+        return f"推送失败 HTTP {r.status_code}：{r.text[:200]}"
+    except Exception as exc:
+        return f"推送失败 {type(exc).__name__}：{exc}"
 
 
 def replace_block(text: str, start: str, end: str, body: str) -> str:
@@ -318,7 +403,8 @@ def main() -> int:
         print(f"  倒挂 {r['name']}  近月溢价 {r['term']['prem']:+.1%}  5年分位 {qstr(r['q5'])}")
     print(f"报警 {len(alerts)} 条：")
     for a in alerts:
-        print("  -", a.replace("**", ""))
+        print("  -", a["text"].replace("**", ""))
+    print(notify(unseen(alerts), rows))
     return 0
 
 
