@@ -50,6 +50,11 @@ TIGHT_Q = 0.85
 # 触发，比主理人 2026-09 才注意到早约 11 个月——这就是这个数的依据
 PROXY_JUMP = 0.20
 
+# 涨幅过线还要放量才报。只看涨幅时 32 个载体合计 52 条/年，加这条降到 24 条/年，
+# 而 BWET 11 条一条没少（2025-09 那条推迟 21 天，2025-10 之后完全一致）。
+# 挡掉的是 VPK.AS、RNR、STNG 那类缩量阴跌反弹——涨了但没人换手，不是供给出事
+PROXY_VOL_MULT = 1.4
+
 PROXY_WORDING = ("代理读数——这是载体自己的涨幅和分位，不是现货紧度。"
                  "运费的真紧度要去 Baltic Exchange 查 TD3C。")
 
@@ -151,19 +156,37 @@ def near_contract(root: str, suffix: str, months: str) -> tuple[str, pd.Series] 
     return None
 
 
-def close_series(ticker: str, period: str = "max") -> pd.Series | None:
+def ohlcv(ticker: str, period: str = "max") -> pd.DataFrame | None:
     for attempt, p in enumerate([period, "5y", "1y"]):
         try:
             h = yf.Ticker(ticker).history(period=p, auto_adjust=False)
             if h.empty:
                 continue
             h.index = h.index.tz_localize(None)
-            c = h["Close"].dropna()
-            return c if len(c) >= 60 else None
+            h = h.dropna(subset=["Close"])
+            return h if len(h) >= 60 else None
         except Exception:
             if attempt == 2:
                 return None
     return None
+
+
+def close_series(ticker: str, period: str = "max") -> pd.Series | None:
+    h = ohlcv(ticker, period)
+    return None if h is None else h["Close"]
+
+
+def vol_mult(h: pd.DataFrame) -> float | None:
+    """近一月成交量中位数 / 再往前一年的中位数。
+
+    跟 r1m 同尺度。用单日量比会错配：月涨幅是 22 天累进的，放量那天未必就是
+    报警那天——BWET 2025-08 月涨 14% 期间反而是缩量（0.55×），10 月才放到 4×。
+    """
+    v = h["Volume"].dropna()
+    if len(v) < 274 or (v <= 0).mean() > 0.3:
+        return None
+    base = float(v.iloc[-274:-22].median())
+    return float(v.iloc[-22:].median()) / base if base > 0 else None
 
 
 def quantile_of(series: pd.Series, value: float, years: int) -> float | None:
@@ -210,9 +233,10 @@ def scan_proxy(item: tuple[str, str]) -> dict:
     期限结构一律留空——载体股价算不出现货对远月的溢价，硬填就是拿别的东西充数。
     """
     name, ticker = item
-    c = close_series(ticker)
-    if c is None:
+    h = ohlcv(ticker)
+    if h is None:
         return {"name": name, "ticker": ticker, "ok": False, "source": "proxy"}
+    c = h["Close"]
     cur = float(c.iloc[-1])
     return {
         "name": name, "ticker": ticker, "ok": True, "price": cur, "source": "proxy",
@@ -220,6 +244,7 @@ def scan_proxy(item: tuple[str, str]) -> dict:
         "q10": quantile_of(c, cur, 10),
         "r1m": cur / c.iloc[-22] - 1 if len(c) > 22 else None,
         "r1y": cur / c.iloc[-253] - 1 if len(c) > 253 else None,
+        "vol_mult": vol_mult(h),
         "stale": (pd.Timestamp(date.today()) - c.index[-1]).days,
         "term": None,
     }
@@ -334,10 +359,14 @@ def build_alerts(rows: list[dict]) -> list[dict]:
         # 代理行只报涨幅异动：载体自己的 5 年分位跟现货紧度没关系，BWET 涨了 47 倍之后
         # 分位恒等于 100%，拿它当紧度会天天误报
         if r.get("source") == "proxy":
-            if r.get("r1m") is not None and r["r1m"] > PROXY_JUMP:
+            vm = r.get("vol_mult")
+            # 拿不到成交量时照报，只在文案里标一句——静默漏报比误报危险
+            if (r.get("r1m") is not None and r["r1m"] > PROXY_JUMP
+                    and (vm is None or vm >= PROXY_VOL_MULT)):
                 ind = RIGID.get(r["name"], {}).get("indicator", "行业现货价")
+                vtxt = f"、成交量 {vm:.1f}× 平时" if vm is not None else "（成交量拿不到）"
                 add(r["name"], "代理载体异动",
-                    f"{r['name']} 主载体 {r['ticker']} 近一月 {r['r1m']:+.0%}，"
+                    f"{r['name']} 主载体 {r['ticker']} 近一月 {r['r1m']:+.0%}{vtxt}，"
                     f"去查 {ind} 确认是不是真紧")
             continue
         name, q5, prev = r["name"], r["q5"], r.get("q5_prev")
@@ -389,12 +418,17 @@ def render(rows: list[dict], crack: dict | None) -> str:
 
     if proxies:
         proxies.sort(key=lambda r: -(r["r1m"] or -9))
-        out += ["", "**没有期货读数的品类（代理读数）**", "", f"{PROXY_WORDING}", "",
-                "| 品类 | 主载体 | 最新 | 5 年分位 | 近一月 | 近一年 |",
-                "|---|---|---:|---:|---:|---:|"]
+        out += ["", "**没有期货读数的品类（代理读数）**", "", f"{PROXY_WORDING}",
+                "", f"量比 = 近一月成交量中位数 ÷ 再往前一年的中位数。涨幅过 "
+                f"{PROXY_JUMP:.0%} 且量比过 {PROXY_VOL_MULT} 才报警——涨了但没人换手，"
+                "通常是缩量反弹而不是供给出事。", "",
+                "| 品类 | 主载体 | 最新 | 5 年分位 | 近一月 | 量比 | 近一年 |",
+                "|---|---|---:|---:|---:|---:|---:|"]
         for r in proxies:
+            vm = r.get("vol_mult")
             out.append(f"| {r['name']} | `{r['ticker']}` | {r['price']:.2f} | "
-                       f"{qstr(r['q5'])} | {pct(r['r1m'])} | {pct(r['r1y'])} |")
+                       f"{qstr(r['q5'])} | {pct(r['r1m'])} | "
+                       f"{f'{vm:.1f}×' if vm is not None else '—'} | {pct(r['r1y'])} |")
 
     if crack:
         out += ["", "**炼能紧张（3-2-1 裂解价差）**", "",
