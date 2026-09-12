@@ -38,6 +38,22 @@ _CENTS = {"GBP": "GBP", "GBX": "GBP", "ZAC": "ZAR"}
 # ICE 软商品期货（CT=F / KC=F / SB=F）的 currency 是 USX（美分每磅）。
 # 这是行业惯用报价单位，笔记一直按美分显示，不去换算也不去拉汇率
 _PASSTHROUGH = {"USD", "USX", ""}
+
+# 期货的 Volume 是合约张数、Close 是单位报价，直接相乘不是成交额，差几万倍：
+# RB=F 汽油这么算出来日均 15 万美元，真实是 61 亿，会被误判成「装不进钱」然后
+# 去买流动性差得多的股票载体。一张合约的名义价值 = 报价 × 合约规格，
+# 美分报价的再 × 0.01。规格是交易所固定的，新增期货载体漏填这里 main 会拦下
+_FUTURES_MULT = {
+    "CL=F": 1000,            # NYMEX 原油，1000 桶，美元/桶
+    "BZ=F": 1000,            # ICE 布伦特，1000 桶，美元/桶
+    "RB=F": 42000,           # NYMEX 汽油，42000 加仑，美元/加仑
+    "CC=F": 10,              # ICE 可可，10 公吨，美元/吨
+    "ZM=F": 100,             # CBOT 豆粕，100 短吨，美元/短吨
+    "SB=F": 112000 * 0.01,   # ICE 11 号糖，112000 磅，美分/磅
+    "CT=F": 50000 * 0.01,    # ICE 棉花，50000 磅，美分/磅
+    "KC=F": 37500 * 0.01,    # ICE 咖啡，37500 磅，美分/磅
+    "ZL=F": 60000 * 0.01,    # CBOT 豆油，60000 磅，美分/磅
+}
 _FX_CACHE: dict[str, pd.Series | None] = {}
 _FX_LOCK = threading.Lock()
 
@@ -100,6 +116,7 @@ def fetch(t: str) -> dict:
             last = c.index[-1]
             stale = (pd.Timestamp(date.today()) - last).days
             dv = float(_to_usd(h["Volume"] * h["Close"], rate, scale).tail(60).mean())
+            dv *= _FUTURES_MULT.get(t, 1)
 
             def ann(days):
                 """days 为交易日数，按每年 252 个交易日折算年化。"""
@@ -139,7 +156,8 @@ def render(rows: list[dict]) -> str:
 
     out = [START, "", f"> 自动生成于 {date.today()}，由 `system/scripts/refresh_rigid_list.py` 写入。"
            f"价格、日均成交额、收益率和回撤全部已换算成美元（按逐日汇率，不是点汇率）。"
-           f"日均成交额 = 近 60 个交易日均值；低于 500 万美元的只算观察标的。", ""]
+           f"日均成交额 = 近 60 个交易日均值，期货合约按「张数 × 报价 × 合约规格」"
+           f"算名义成交额；低于 500 万美元的只算观察标的。", ""]
     out.append("| 载体 | 市场 | 类型 | 价格 | 日均成交额 | 可执行 | 近一年 | 3 年年化 | 5 年年化 | 最大回撤 |")
     out.append("|---|---|---|---:|---:|---|---:|---:|---:|---:|")
     for r in alive:
@@ -181,6 +199,10 @@ def main() -> int:
     tickers = all_tickers()
     if not tickers:
         print("rigid_list.RIGID 里一个载体都没有", file=sys.stderr)
+        return 1
+    no_mult = [t for t in tickers if t.endswith("=F") and t not in _FUTURES_MULT]
+    if no_mult:
+        print(f"这些期货合约还没填合约乘数，成交额会算错几万倍：{no_mult}", file=sys.stderr)
         return 1
     print(f"rigid_list 里 {len(tickers)} 个载体，开始拉数据…")
 
