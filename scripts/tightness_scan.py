@@ -109,6 +109,9 @@ TERM = {
 # 远月取 8-12 个月之后。太近会撞上近月合约本身，太远流动性差
 FAR_MIN, FAR_MAX = 8, 12
 
+# 近月和远月共同有报价的最后一天，允许比近月自己的最后一天旧几天
+MAX_TERM_LAG = 5
+
 
 def far_contract(root: str, suffix: str, months: str, on: date | None = None) -> str | None:
     """找 8-12 个月后第一个该品种有活跃合约的交割月。on 用于回填历史某天。"""
@@ -199,13 +202,18 @@ def term_one(name: str) -> dict | None:
     far = close_series(code, "6mo")
     if near is None or far is None:
         return None
-    n, f = float(near.iloc[-1]), float(far.iloc[-1])
+    # 两条腿必须取同一天的收盘。Yahoo 对远月合约经常停更几天，各自取 iloc[-1]
+    # 会拿两个不同日期的价格相比，算出根本不存在的倒挂（2026-09-11 糖被误报
+    # 「翻转倒挂 +3.0%」、同日咖啡被低估成 +4.6%，实际一直在 -2% 和 +14% 附近）
+    both = pd.concat({"n": near, "f": far}, axis=1).dropna()
+    if both.empty or (near.index[-1] - both.index[-1]).days > MAX_TERM_LAG:
+        return None
+    n, f = float(both.n.iloc[-1]), float(both.f.iloc[-1])
     # 价格完全相同说明 Yahoo 把连续合约映射到了同一张合约，不是真的平价
     if f <= 0 or abs(n - f) < 1e-9:
         return None
     out = {"code": code, "near": n, "far": f, "prem": n / f - 1, "prem_prev": None}
     # 一个月前的溢价：能看出在往 backwardation 走还是往 contango 走
-    both = pd.concat({"n": near, "f": far}, axis=1).dropna()
     if len(both) > 23:
         p = both.iloc[-23]
         if p.f > 0:
