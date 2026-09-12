@@ -46,9 +46,18 @@ COOLDOWN_DAYS = 30
 # 分位超过这个数就标紧
 TIGHT_Q = 0.85
 
-# 代理读数的异动线。BWET 那波 2025-08 起月线 +14%/+17%/+22%/+28%，20% 会在第三个月
-# 触发，比主理人 2026-09 才注意到早约 11 个月——这就是这个数的依据
-PROXY_JUMP = 0.20
+# 代理读数的异动线。原来是所有载体一律 20%，那个数是拿 BWET 调的（2025-08 起月线
+# +14%/+17%/+22%/+28%，20% 在第三个月触发）。但 43 个代理载体的波动差一个数量级：
+# BWET 的 22 日涨幅 90 分位有 52%，20% 对它只是常态波动；CNI 十年里最大的 22 日涨幅
+# 才 18.1%、SRG.MI 全历史也只有 19.9%，20% 这条线它们永远够不着，这两格等于没有报警。
+# 改成各载体按自己的 22 日涨幅分位定线，再夹进 [FLOOR, CAP]。
+PROXY_JUMP_Q = 0.90
+PROXY_JUMP_FLOOR = 0.10
+# 上限必须留在 20%：实测放宽到 25% 时 BWET 首条报警从 2025-09-26 推迟到 2025-10-30，
+# 晚一个月，全表还多丢 21 条。夹在 20% 时 BWET 那波一条没丢，首条反而提前到 2025-07-15
+PROXY_JUMP_CAP = 0.20
+# 分位至少要两年数据才算得准，不够就退回固定 20%（新上市载体保持原行为）
+PROXY_HIST_MIN = 504
 
 # 涨幅过线还要放量才报。只看涨幅时 32 个载体合计 52 条/年，加这条降到 24 条/年，
 # 而 BWET 11 条一条没少（2025-09 那条推迟 21 天，2025-10 之后完全一致）。
@@ -72,6 +81,8 @@ FREIGHT_SECTION = {
     "VLCC 原油油轮运费": ("tanker", "TD3C"),
     "成品油轮 MR/LR2": ("tanker", "MR Atlantic Triangulation"),
     "干散货运费": ("bulk", "5TC"),
+    "集装箱运费": ("container", "FBX01"),
+    "LNG 运输": ("gas", "BLNG1"),
 }
 FREIGHT_CHARS = 420
 
@@ -200,10 +211,26 @@ def vol_mult(h: pd.DataFrame) -> float | None:
     报警那天——BWET 2025-08 月涨 14% 期间反而是缩量（0.55×），10 月才放到 4×。
     """
     v = h["Volume"].dropna()
-    if len(v) < 274 or (v <= 0).mean() > 0.3:
+    if len(v) < 274:
         return None
-    base = float(v.iloc[-274:-22].median())
+    # 数据质量只看用得到的这 274 天。原来拿全历史判断，SUZB3.SA 早年有 60% 的日子
+    # 没量，整个载体的量比就被判死，可它近 22 日量中位有 775 万股，近期数据是好的
+    v = v.iloc[-274:]
+    if (v <= 0).mean() > 0.3:
+        return None
+    base = float(v.iloc[:-22].median())
     return float(v.iloc[-22:].median()) / base if base > 0 else None
+
+
+def jump_thr(c: pd.Series) -> float:
+    """这个载体自己的异动线：22 日涨幅的 PROXY_JUMP_Q 分位，夹进上下限。
+
+    每天用截至当天的全部历史算，所以不存在拿未来数据定线的问题。
+    """
+    r = (c / c.shift(22) - 1).dropna()
+    if len(r) < PROXY_HIST_MIN:
+        return PROXY_JUMP_CAP
+    return float(min(max(r.quantile(PROXY_JUMP_Q), PROXY_JUMP_FLOOR), PROXY_JUMP_CAP))
 
 
 def quantile_of(series: pd.Series, value: float, years: int) -> float | None:
@@ -262,6 +289,7 @@ def scan_proxy(item: tuple[str, str]) -> dict:
         "r1m": cur / c.iloc[-22] - 1 if len(c) > 22 else None,
         "r1y": cur / c.iloc[-253] - 1 if len(c) > 253 else None,
         "vol_mult": vol_mult(h),
+        "jump_thr": jump_thr(c),
         "stale": (pd.Timestamp(date.today()) - c.index[-1]).days,
         "term": None,
     }
@@ -377,14 +405,15 @@ def build_alerts(rows: list[dict]) -> list[dict]:
         # 分位恒等于 100%，拿它当紧度会天天误报
         if r.get("source") == "proxy":
             vm = r.get("vol_mult")
+            thr = r.get("jump_thr", PROXY_JUMP_CAP)
             # 拿不到成交量时照报，只在文案里标一句——静默漏报比误报危险
-            if (r.get("r1m") is not None and r["r1m"] > PROXY_JUMP
+            if (r.get("r1m") is not None and r["r1m"] > thr
                     and (vm is None or vm >= PROXY_VOL_MULT)):
                 ind = RIGID.get(r["name"], {}).get("indicator", "行业现货价")
                 vtxt = f"、成交量 {vm:.1f}× 平时" if vm is not None else "（成交量拿不到）"
                 add(r["name"], "代理载体异动",
                     f"{r['name']} 主载体 {r['ticker']} 近一月 {r['r1m']:+.0%}{vtxt}，"
-                    f"去查 {ind} 确认是不是真紧")
+                    f"异动线 {thr:.0%}，去查 {ind} 确认是不是真紧")
             continue
         name, q5, prev = r["name"], r["q5"], r.get("q5_prev")
         t = r.get("term")
@@ -436,14 +465,19 @@ def render(rows: list[dict], crack: dict | None) -> str:
     if proxies:
         proxies.sort(key=lambda r: -(r["r1m"] or -9))
         out += ["", "**没有期货读数的品类（代理读数）**", "", f"{PROXY_WORDING}",
-                "", f"量比 = 近一月成交量中位数 ÷ 再往前一年的中位数。涨幅过 "
-                f"{PROXY_JUMP:.0%} 且量比过 {PROXY_VOL_MULT} 才报警——涨了但没人换手，"
-                "通常是缩量反弹而不是供给出事。", "",
-                "| 品类 | 主载体 | 最新 | 5 年分位 | 近一月 | 量比 | 近一年 |",
-                "|---|---|---:|---:|---:|---:|---:|"]
+                "", f"量比 = 近一月成交量中位数 ÷ 再往前一年的中位数。近一月涨幅过"
+                "「异动线」且量比过 "
+                f"{PROXY_VOL_MULT} 才报警——涨了但没人换手，通常是缩量反弹而不是供给出事。",
+                "", f"异动线不是一刀切：取该载体自己 22 日涨幅的 {PROXY_JUMP_Q:.0%} 分位，"
+                f"夹在 {PROXY_JUMP_FLOOR:.0%}-{PROXY_JUMP_CAP:.0%} 之间。"
+                "统一用 20% 时，波动小的载体（CNI 十年最大涨幅 18.1%）永远够不着，那一格是哑的。",
+                "", "| 品类 | 主载体 | 最新 | 异动线 | 5 年分位 | 近一月 | 量比 | 近一年 |",
+                "|---|---|---:|---:|---:|---:|---:|---:|"]
         for r in proxies:
             vm = r.get("vol_mult")
+            thr = r.get("jump_thr")
             out.append(f"| {r['name']} | `{r['ticker']}` | {r['price']:.2f} | "
+                       f"{f'{thr:.0%}' if thr is not None else '—'} | "
                        f"{qstr(r['q5'])} | {pct(r['r1m'])} | "
                        f"{f'{vm:.1f}×' if vm is not None else '—'} | {pct(r['r1y'])} |")
 
