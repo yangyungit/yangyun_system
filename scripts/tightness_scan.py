@@ -20,6 +20,7 @@ import sys
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
+from functools import lru_cache
 from pathlib import Path
 
 import pandas as pd
@@ -112,6 +113,9 @@ FAR_MIN, FAR_MAX = 8, 12
 # 近月和远月共同有报价的最后一天，允许比近月自己的最后一天旧几天
 MAX_TERM_LAG = 5
 
+# 近月最多往后找几个交割月；`XX=F` 和显式近月合约允许差多少
+NEAR_MAX, NEAR_TOL = 3, 0.015
+
 
 def far_contract(root: str, suffix: str, months: str, on: date | None = None) -> str | None:
     """找 8-12 个月后第一个该品种有活跃合约的交割月。on 用于回填历史某天。"""
@@ -121,6 +125,29 @@ def far_contract(root: str, suffix: str, months: str, on: date | None = None) ->
         code = MONTH_CODE[m % 12]
         if code in months:
             return f"{root}{code}{(on.year + m // 12) % 100:02d}.{suffix}"
+    return None
+
+
+@lru_cache(maxsize=None)
+def near_contract(root: str, suffix: str, months: str) -> tuple[str, pd.Series] | None:
+    """显式拼出当前近月合约，不用 Yahoo 的 `XX=F` 连续报价。
+
+    连续报价会临时滚到下一张合约：2026-09-11 糖滚到 SBH27（报 19.23，当天真实
+    近月 18.15，19.23 在前后两周的近月里根本没成交过）、同日咖啡滚到 KCZ26
+    （报 289.00，真实 313.65）。糖是正向市场滚过去变贵、咖啡深度倒挂滚过去变便宜，
+    于是一个被算成假倒挂、一个把 +14% 压成 +4.6%。这里按交割月往后找第一张还在
+    交易的，合约到期自然往后走。
+    """
+    today = date.today()
+    for out in range(NEAR_MAX + 1):
+        m = today.month - 1 + out
+        code = MONTH_CODE[m % 12]
+        if code not in months:
+            continue
+        t = f"{root}{code}{(today.year + m // 12) % 100:02d}.{suffix}"
+        c = close_series(t, "1y")
+        if c is not None and (pd.Timestamp(today) - c.index[-1]).days <= MAX_TERM_LAG:
+            return t, c
     return None
 
 
@@ -152,6 +179,14 @@ def scan_one(item: tuple[str, str]) -> dict:
     if c is None:
         return {"name": name, "ticker": ticker, "ok": False}
     cur = float(c.iloc[-1])
+    # `XX=F` 滚月时价格、分位、涨跌幅整行都是错的，不只是期限结构。对不上就整行
+    # 不出，不硬填——2026-09-11 糖那条假报警就是硬填出来的
+    if name in TERM:
+        nc = near_contract(*TERM[name])
+        if nc is not None and abs(cur / float(nc[1].iloc[-1]) - 1) > NEAR_TOL:
+            print(f"  {name}：{ticker} 报 {cur:.2f}，显式近月 {nc[0]} 是 "
+                  f"{float(nc[1].iloc[-1]):.2f}，连续合约滚月了，本日跳过")
+            return {"name": name, "ticker": ticker, "ok": False}
     row = {
         "name": name, "ticker": ticker, "ok": True, "price": cur,
         "q5": quantile_of(c, cur, 5),
@@ -198,10 +233,11 @@ def term_one(name: str) -> dict | None:
     code = far_contract(root, suffix, months)
     if code is None:
         return None
-    near = close_series(FUTURES[name], "1y")
+    nc = near_contract(root, suffix, months)
     far = close_series(code, "6mo")
-    if near is None or far is None:
+    if nc is None or far is None:
         return None
+    near = nc[1]
     # 两条腿必须取同一天的收盘。Yahoo 对远月合约经常停更几天，各自取 iloc[-1]
     # 会拿两个不同日期的价格相比，算出根本不存在的倒挂（2026-09-11 糖被误报
     # 「翻转倒挂 +3.0%」、同日咖啡被低估成 +4.6%，实际一直在 -2% 和 +14% 附近）
@@ -213,11 +249,14 @@ def term_one(name: str) -> dict | None:
     if f <= 0 or abs(n - f) < 1e-9:
         return None
     out = {"code": code, "near": n, "far": f, "prem": n / f - 1, "prem_prev": None}
-    # 一个月前的溢价：能看出在往 backwardation 走还是往 contango 走
-    if len(both) > 23:
-        p = both.iloc[-23]
-        if p.f > 0:
-            out["prem_prev"] = p.n / p.f - 1
+    # 一个月前的溢价：能看出在往 backwardation 走还是往 contango 走。这一段仍然用
+    # `XX=F`，因为一个月前的近月是另一张合约，拿今天这张回溯会比错对象；滚月只污染
+    # 最新报价，历史那几天 Yahoo 事后会改回来
+    hist = close_series(FUTURES[name], "1y")
+    if hist is not None:
+        prev = pd.concat({"n": hist, "f": far}, axis=1).dropna()
+        if len(prev) > 23 and prev.f.iloc[-23] > 0:
+            out["prem_prev"] = prev.n.iloc[-23] / prev.f.iloc[-23] - 1
     return out
 
 
