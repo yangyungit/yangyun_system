@@ -58,6 +58,23 @@ PROXY_VOL_MULT = 1.4
 PROXY_WORDING = ("代理读数——这是载体自己的涨幅和分位，不是现货紧度。"
                  "运费的真紧度要去 Baltic Exchange 查 TD3C。")
 
+# TD3C 这类真实运价的日度数据要订阅 Baltic Exchange，但他们每周的免费周报正文里
+# 就写着数字（2026 Week 36：TD3C WS677.22，TCE 约 70.4 万美元/天）。官网挂了 bot
+# 防护，curl 和网页抓取都只拿到验证页，所以从转载全文的这个财经站取
+FREIGHT_LIST = "https://seecapitalmarkets.com/en/featured-news"
+FREIGHT_PAGE = "https://seecapitalmarkets.com/en/read-featured-news?id={id}&slug={slug}"
+FREIGHT_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0 Safari/537.36"
+
+# 品类 -> (周报类型, 在正文里定位该品类那段的锚点词)。只有运费品类有周报可查
+# 摘原文不抠数字：每周措辞都变（「just under $704,000」/「above $58,000」），
+# 正则抠数字必漏，整段贴过来还能顺带看到涨跌原因
+FREIGHT_SECTION = {
+    "VLCC 原油油轮运费": ("tanker", "TD3C"),
+    "成品油轮 MR/LR2": ("tanker", "MR Atlantic Triangulation"),
+    "干散货运费": ("bulk", "5TC"),
+}
+FREIGHT_CHARS = 420
+
 # 报警只说「紧度翻转了」，不说为什么翻。新闻库补上这一句
 NEWS_DB = Path.home() / "yangyun/Code_Projects/valuation-radar/data/narrative.db"
 NEWS_LOOKBACK_DAYS = 7
@@ -594,6 +611,47 @@ def why_news(name: str, on: date | None = None) -> list[tuple[str, str]]:
     return out
 
 
+@lru_cache(maxsize=4)
+def freight_report(kind: str) -> tuple[str, str] | None:
+    """Baltic 最新一期免费周报（kind = tanker / bulk），返回（期号, 正文纯文本）。
+
+    转载站不保证每期都转（2026 Week 35 就缺），抓不到返回 None——报警照常推，
+    只是不带运价那一行。
+    """
+    head = {"User-Agent": FREIGHT_UA}
+    try:
+        idx = requests.get(FREIGHT_LIST, headers=head, timeout=20).text
+        hits = re.findall(
+            rf"read-featured-news\?id=(\d+)&(?:amp;)?slug=({kind}-report-week-\d+)", idx)
+        if not hits:
+            return None
+        # 列表页按时间倒序，第一条就是最新一期
+        nid, slug = hits[0]
+        page = requests.get(FREIGHT_PAGE.format(id=nid, slug=slug),
+                            headers=head, timeout=20).text
+        return slug, re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", page))
+    except Exception:
+        return None
+
+
+def freight_quote(name: str) -> str | None:
+    """报警品类对应的那段周报原文，没有就 None。"""
+    sec = FREIGHT_SECTION.get(name)
+    if sec is None:
+        return None
+    rep = freight_report(sec[0])
+    if rep is None:
+        return None
+    slug, text = rep
+    i = text.find(sec[1])
+    if i < 0:
+        return None
+    # 退到上一句句尾，别从半句中间开始念
+    back = text.rfind(". ", 0, i)
+    start = i if back < 0 or i - back > 300 else back + 2
+    return f"{slug}　{text[start:start + FREIGHT_CHARS].strip()}…"
+
+
 def chunk_lines(lines: list[str], limit: int = 1900) -> list[str]:
     """按行装箱。带上新闻之后正文轻易超过 Discord 的 2000 字上限，
     原来那种一刀切到 1900 会把后面的报警整条吃掉，改成分几条发。"""
@@ -623,9 +681,14 @@ def notify(alerts: list[dict], rows: list[dict]) -> str:
                   key=lambda r: -r["term"]["prem"])
     lines = [f"**供给刚性清单 · 紧度报警**　{date.today()}", ""]
     for a in alerts:
+        cat = a["key"].split("|")[0]
         lines.append(f"- {a['text']}")
-        news = why_news(a["key"].split("|")[0])
+        news = why_news(cat)
         lines += [f"　　· {d}　{h}" for d, h in news] if news else [f"　　· {NO_NEWS}"]
+        # 运费品类额外贴一段 Baltic 周报原文——这是真运价，载体股价只是预期
+        quote = freight_quote(cat)
+        if quote:
+            lines.append(f"　　· {quote}")
     if back:
         lines += ["", "当前处在倒挂（现货紧张）的品类："]
         lines.append("　" + "、".join(f"{r['name']} {r['term']['prem']:+.1%}" for r in back))
