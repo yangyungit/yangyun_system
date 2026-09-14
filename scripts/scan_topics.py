@@ -8,12 +8,17 @@
 只做粗筛和摘要，不判断值不值得写——判断要开一个会话，
 读 obsidian_notes/99_Human_Zone/深读选题池.md 里的规则。
 
+扫到新候选会推一条 Discord（webhook 在根 .env 的 DISCORD_WEBHOOK_TOPICS），
+不然它们只在 memory/inbox/topics-pending.md 里无声堆着。
+
 粗筛条件：顶层 md、够长、不是思维模型库、没被选题池或深读列表收录过。
 """
 import re
 import sys
 import time
 from pathlib import Path
+
+import requests
 
 ROOT = Path(__file__).resolve().parents[2]
 ZONE = ROOT / "obsidian_notes" / "99_Human_Zone"
@@ -23,6 +28,7 @@ PENDING = ROOT / "memory" / "inbox" / "topics-pending.md"
 
 MIN_BYTES = 3000  # 低于这个基本是 stub 或一句话备忘，撑不起一篇
 SUMMARY_LEN = 500
+PUSH_SUMMARY_LEN = 220  # Discord 一条 2000 字上限，摘要按这个截；全文仍写进 pending
 
 BACKLOG_ALERT = 15  # 待判断攒过这个数，就在选题池顶上挂一行，不然只在 inbox 里无声堆着
 MARK_BEGIN = "<!-- backlog -->"
@@ -108,7 +114,7 @@ def backlog():
     if not PENDING.exists():
         return 0, ""
     text = PENDING.read_text(errors="ignore")
-    dates = re.findall(r"^## 扫描 (\S+)", text, re.M)
+    dates = re.findall(r"^## 扫描 (\d{4}-\d{2}-\d{2})", text, re.M)
     return len(re.findall(r"^### ", text, re.M)), dates[0] if dates else ""
 
 
@@ -132,6 +138,62 @@ def mark_pool():
             1,
         )
     POOL.write_text(text)
+
+
+def read_env(key):
+    """launchd 不加载 .env，脚本自己读根 .env。"""
+    f = ROOT / ".env"
+    if not f.exists():
+        return None
+    for line in f.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line.startswith(f"{key}="):
+            return line.split("=", 1)[1].strip() or None
+    return None
+
+
+def chunk_lines(lines, limit=1900):
+    out, cur = [], ""
+    for ln in lines:
+        if len(ln) > limit:
+            ln = ln[: limit - 1] + "…"
+        if cur and len(cur) + 1 + len(ln) > limit:
+            out.append(cur)
+            cur = ln
+        else:
+            cur = f"{cur}\n{ln}" if cur else ln
+    if cur:
+        out.append(cur)
+    return out
+
+
+def notify(found, days):
+    """推 Discord。推送失败不影响写 pending——那份是判断会话的输入，优先级更高。"""
+    url = read_env("DISCORD_WEBHOOK_TOPICS")
+    if not url:
+        return "根 .env 里没有 DISCORD_WEBHOOK_TOPICS，跳过推送"
+
+    count, since = backlog()
+    lines = [f"**深读选题 · 新候选 {len(found)} 条**　近 {days} 天", ""]
+    for yrs, mt, name, size, summary in found:
+        day = time.strftime("%m-%d", time.localtime(mt))
+        lines += [
+            f"**{name}**　{day} · {size // 1000}KB · 年份 {yrs} 处",
+            summary[:PUSH_SUMMARY_LEN] + ("…" if len(summary) > PUSH_SUMMARY_LEN else ""),
+            "",
+        ]
+    lines.append(f"待判断共 {count} 条（最早 {since}），判断规则见选题池。")
+
+    sent = 0
+    for body in chunk_lines(lines):
+        try:
+            r = requests.post(url, json={"content": body}, timeout=20)
+            if r.status_code not in (200, 204):
+                return f"推送失败 HTTP {r.status_code}：{r.text[:200]}（已发 {sent} 条）"
+            sent += 1
+        except Exception as exc:
+            return f"推送失败 {type(exc).__name__}：{exc}（已发 {sent} 条）"
+    return f"已推送 {len(found)} 条候选到 Discord（分 {sent} 条消息）"
 
 
 def main():
@@ -163,6 +225,7 @@ def main():
     print(f"{PENDING}：新增 {len(found)} 条候选")
     for yrs, _, name, _, _ in found:
         print(f"  {yrs:>3} 年份  {name}")
+    print(notify(found, days))
 
 
 if __name__ == "__main__":
