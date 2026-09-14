@@ -36,6 +36,10 @@ VOTES = ROOT / "memory" / "inbox" / "topic-votes.json"
 
 KEEP, DROP = "✅", "❌"
 
+# 点理由表情等于毙掉 + 记下为什么。攒够同一类就把它写进上面的粗筛正则，以后不再推上来。
+REASONS = {"📋": "内部文档", "🇨🇳": "国内选题", "🔢": "没数字撑"}
+PRESET = [KEEP, *REASONS, DROP]
+
 MIN_BYTES = 3000  # 低于这个基本是 stub 或一句话备忘，撑不起一篇
 SUMMARY_LEN = 500
 PUSH_SUMMARY_LEN = 220  # Discord 一条 2000 字上限，摘要按这个截；全文仍写进 pending
@@ -47,9 +51,12 @@ MARK_END = "<!-- /backlog -->"
 # 编号开头的是芒格思维模型库，批量导入的，不是聊出来的
 NUMBERED = re.compile(r"^\d{3} ")
 
-# 内部运营文档，不对外发；靠文件名兜底，漏了由判断会话剔
+# 内部运营文档，不对外发；靠文件名兜底，漏了由判断会话剔。
+# 后半截是 2026-09-14 从 Discord 上毙掉的实例补的：
+# 基本面调研模版 / 客户画像 / L0战略 / 关键词圈地 / 扩张期财务指标 / 供给刚性清单_事件回测明细
 INTERNAL = re.compile(
-    r"环节$|清单$|列表$|模板$|选题池$|^EP\d|^养云|^躺盈|prompt|todo|FAQ|架构$|页面|后台|前台",
+    r"环节$|清单$|列表$|模[板版]$|选题池$|^EP\d|^养云|^躺盈|prompt|todo|FAQ|架构$|页面|后台|前台"
+    r"|画像$|指标$|明细$|^L\d|^关键词",
     re.I,
 )
 
@@ -211,10 +218,12 @@ def notify(found, days):
         return "根 .env 里没有 DISCORD_WEBHOOK_TOPICS，跳过推送"
 
     count, since = backlog()
+    reasons = "　".join(f"{e} {t}" for e, t in REASONS.items())
     header = (
         f"**深读选题 · 新候选 {len(found)} 条**　近 {days} 天　"
         f"（待判断共 {count} 条，最早 {since}）\n"
-        f"{KEEP} 留着细看　{DROP} 毙掉"
+        f"{KEEP} 留着细看　{DROP} 毙掉（不说理由）\n"
+        f"毙掉并记下理由：{reasons}　理由是别的就回复那条消息一句话"
     )
     votes = load_votes()
     heads = bot_headers()
@@ -236,7 +245,7 @@ def notify(found, days):
             msg = r.json()
             votes[msg["id"]] = name
             votes["_channel"] = msg["channel_id"]
-            for emo in (KEEP, DROP):
+            for emo in PRESET:
                 if heads and not add_reaction(msg["channel_id"], msg["id"], emo, heads):
                     missed += 1
                 time.sleep(0.3)  # 表情接口限速比发消息严，不睡会 429
@@ -252,8 +261,28 @@ def notify(found, days):
     return f"已推送 {sent} 条候选到 Discord{err}"
 
 
+def fetch_messages(channel, heads, cap=500):
+    """翻页拉频道消息。只拉一页的话，堆多了早先那批候选会滑出窗口、表情永远收不到。"""
+    out, before = [], None
+    while len(out) < cap:
+        params = {"limit": 100}
+        if before:
+            params["before"] = before
+        r = requests.get(
+            f"{API}/channels/{channel}/messages", headers=heads, params=params, timeout=30
+        )
+        if r.status_code != 200:
+            raise RuntimeError(f"HTTP {r.status_code}：{r.text[:200]}")
+        page = r.json()
+        out += page
+        if len(page) < 100:
+            break
+        before = page[-1]["id"]
+    return out
+
+
 def collect_votes():
-    """读 Discord 上点过的表情：❌ 的从 pending 删掉并记账，✅ 的打标记。
+    """读 Discord 上的表情和回复，落进 pending 和 topics-rejected.md。
 
     在扫描前跑，这样毙掉的不会被当新笔记重新扫回来。
     """
@@ -264,57 +293,87 @@ def collect_votes():
         return "无待收表情"
 
     try:
-        r = requests.get(
-            f"{API}/channels/{channel}/messages",
-            headers=heads,
-            params={"limit": 100},
-            timeout=30,
-        )
+        msgs = fetch_messages(channel, heads)
     except Exception as exc:
         return f"读表情失败 {type(exc).__name__}：{exc}"
-    if r.status_code != 200:
-        return f"读表情失败 HTTP {r.status_code}：{r.text[:200]}"
 
-    keep, drop = [], []
-    for msg in r.json():
+    # 回复挂在候选消息上，用来补表情表达不了的理由
+    notes = {}
+    for m in msgs:
+        ref = (m.get("message_reference") or {}).get("message_id")
+        if ref in votes and m["content"].strip():
+            notes.setdefault(ref, []).append(clean_md(m["content"])[:200])
+
+    keep, drop, noted = [], [], []
+    for msg in msgs:
         name = votes.get(msg["id"])
         if not name:
             continue
         # bot 自己预置那一个不算票，所以 count 要 >= 2
         counts = {x["emoji"]["name"]: x["count"] for x in msg.get("reactions", [])}
-        if counts.get(DROP, 0) >= 2 and counts.get(KEEP, 0) < 2:
-            drop.append(name)
-        elif counts.get(KEEP, 0) >= 2:
-            keep.append(name)
+        note = "；".join(notes.get(msg["id"], []))
+        why = [t for e, t in REASONS.items() if counts.get(e, 0) >= 2]
+        if counts.get(KEEP, 0) >= 2:
+            keep.append((name, note))
+        elif why or counts.get(DROP, 0) >= 2:
+            drop.append((name, why, note))
+        elif note:
+            noted.append((name, note))  # 只回复没点表情：去留不动，但别把这句话丢了
 
-    if not (keep or drop):
+    if not (keep or drop or noted):
         return "没有新点的表情"
 
     text = PENDING.read_text()
-    for name in drop:
+    for name, _, _ in drop:
         text = re.sub(
             rf"^### \[\[{re.escape(name)}\]\].*?(?=^### |^## |\Z)",
             "",
             text,
             flags=re.M | re.S,
         )
-    for name in keep:
-        text = text.replace(f"### [[{name}]]\n", f"### [[{name}]] {KEEP}\n", 1)
+    for name, note in keep:
+        mark = f"### [[{name}]] {KEEP}" + (f"　备注：{note}" if note else "")
+        text = text.replace(f"### [[{name}]]\n", f"{mark}\n", 1)
+    for name, note in noted:
+        if note not in text:  # 这条还留在 votes 里，下次别重复贴
+            text = text.replace(f"### [[{name}]]\n", f"### [[{name}]]　备注：{note}\n", 1)
     PENDING.write_text(text)
 
     if drop:
         new = not REJECTED.exists()
         with REJECTED.open("a") as fh:
             if new:
-                fh.write("# 毙掉的选题\n\n在 Discord 点 ❌ 的，扫描时不再重复报。\n")
-            fh.write(f"\n## {time.strftime('%Y-%m-%d')}\n")
-            fh.writelines(f"- [[{n}]]\n" for n in drop)
+                fh.write(
+                    "# 毙掉的选题\n\n"
+                    "在 Discord 点理由表情或回复毙掉的，扫描时不再重复报。\n"
+                    "攒够同一类理由，就把它写进 `system/scripts/scan_topics.py` 的 "
+                    "`INTERNAL` / `SYSTEM_DOC` 粗筛正则，以后根本不推上来。\n\n"
+                    "| 日期 | 笔记 | 理由 | 备注 |\n|---|---|---|---|\n"
+                )
+            today = time.strftime("%Y-%m-%d")
+            for name, why, note in drop:
+                # 没点理由表情时，回复那句话本身就是理由，不用再写一遍「见备注」
+                fh.write(
+                    f"| {today} | [[{name}]] | {'、'.join(why) or note or '未标注'} | "
+                    f"{note if why else ''} |\n"
+                )
 
-    for msg_id in [k for k, v in votes.items() if v in keep + drop]:
+    done = {n for n, _ in keep} | {n for n, _, _ in drop}
+    for msg_id in [k for k, v in votes.items() if v in done]:
         votes.pop(msg_id)
     votes["_channel"] = channel
     VOTES.write_text(json.dumps(votes, ensure_ascii=False, indent=1))
-    return f"收到表情：{KEEP} 留下 {len(keep)} 条，{DROP} 毙掉 {len(drop)} 条"
+
+    tally = {}
+    for _, why, note in drop:
+        for w in why or ["回复说明" if note else "未标注"]:
+            tally[w] = tally.get(w, 0) + 1
+    parts = [f"{KEEP} 留下 {len(keep)} 条", f"毙掉 {len(drop)} 条"]
+    if tally:
+        parts.append("其中 " + "、".join(f"{w} {c} 条" for w, c in tally.items()))
+    if noted:
+        parts.append(f"另有 {len(noted)} 条只回复没点表情，备注已记")
+    return "收到表情：" + "，".join(parts)
 
 
 def main():
