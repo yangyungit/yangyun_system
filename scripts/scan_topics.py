@@ -56,7 +56,7 @@ NUMBERED = re.compile(r"^\d{3} ")
 # 基本面调研模版 / 客户画像 / L0战略 / 关键词圈地 / 扩张期财务指标 / 供给刚性清单_事件回测明细
 INTERNAL = re.compile(
     r"环节$|清单$|列表$|模[板版]$|选题池$|^EP\d|^养云|^躺盈|prompt|todo|FAQ|架构$|页面|后台|前台"
-    r"|画像$|指标$|明细$|^L\d|^关键词",
+    r"|画像$|指标$|明细$|商业模式$|^L\d|^关键词",
     re.I,
 )
 
@@ -230,7 +230,9 @@ def notify(found, days):
     sent, missed = 0, 0
     err = ""
     try:
-        requests.post(url, json={"content": header}, timeout=20)
+        r = requests.post(f"{url}?wait=true", json={"content": header}, timeout=20)
+        if r.status_code in (200, 204):
+            votes.setdefault("_headers", []).append(r.json()["id"])
         for yrs, mt, name, size, summary in found:
             day = time.strftime("%m-%d", time.localtime(mt))
             body = (
@@ -288,6 +290,7 @@ def collect_votes():
     """
     votes = load_votes()
     channel = votes.pop("_channel", None)
+    headers_ = votes.pop("_headers", [])
     heads = bot_headers()
     if not (votes and channel and heads and PENDING.exists()):
         return "无待收表情"
@@ -358,10 +361,30 @@ def collect_votes():
                     f"{note if why else ''} |\n"
                 )
 
+    # 判过的从频道删掉，不然下次新候选跟旧的混一起。记录在 pending 和 rejected 里
     done = {n for n, _ in keep} | {n for n, _, _ in drop}
+    url = read_env("DISCORD_WEBHOOK_TOPICS")
+
+    def drop_msg(msg_id):
+        if not url:
+            return
+        try:
+            requests.delete(f"{url}/messages/{msg_id}", timeout=20)
+            time.sleep(0.35)
+        except Exception:
+            pass
+
     for msg_id in [k for k, v in votes.items() if v in done]:
+        drop_msg(msg_id)
         votes.pop(msg_id)
+    if not votes:  # 这批候选全判完了，表头也过期了
+        for msg_id in headers_:
+            drop_msg(msg_id)
+        headers_ = []
+
     votes["_channel"] = channel
+    if headers_:
+        votes["_headers"] = headers_
     VOTES.write_text(json.dumps(votes, ensure_ascii=False, indent=1))
 
     tally = {}
