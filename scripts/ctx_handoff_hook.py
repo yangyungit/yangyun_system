@@ -26,13 +26,15 @@ CURSOR_STATE = (
 TZ = timezone(timedelta(hours=8))
 CTX_WINDOW = 300_000
 
-# 自动写摘要的档位，比 ctx_watch.py 的 Discord 提醒档高：
-# 写摘要本身要花几千 token，还打断手上的活，10 万就催太吵。
-# 两档分别是窗口的一半和四分之三，一档只触发一次。
-TIERS = [
-    (220_000, "auto-满"),
-    (150_000, "auto-半"),
-]
+# 自动写摘要的档位。10 万这档是算出来的不是拍的：近 30 天数据重跑反事实，
+# 10 万拆省 29%（约 $400/月），15 万只省 15.5%（$214/月），代价是一天多换六次窗口。
+# 22 万那档是兜底，给 10 万没听劝的时候再催一次。
+# 档位名跟着阈值走，改了阈值旧的已提醒记录就不会挡住新档。
+TIERS = [220_000, 100_000]
+
+
+def tier_name(limit: int) -> str:
+    return f"auto-{limit // 1000}k"
 
 
 def ctx_tokens(cid: str) -> tuple[int, str] | None:
@@ -58,9 +60,9 @@ def ctx_tokens(cid: str) -> tuple[int, str] | None:
 
 
 def tier_of(tokens: int) -> str | None:
-    for limit, name in TIERS:
+    for limit in TIERS:
         if tokens >= limit:
-            return name
+            return tier_name(limit)
     return None
 
 
