@@ -10,6 +10,8 @@ Discord 只能告诉你「该换会话了」，换不了。真正的痛点是换
 而唯一知道上下文的就是正在聊的这个会话本身。stop hook 是唯一能反过来驱动它干活的入口。
 
 摘要内容和落盘位置由 handoff skill 规定，本脚本只负责判断时机和发口令。
+「要不要写摘要」不在这儿判断——脚本看不见会话干了什么。口令里带了判断标准，
+产出已经落盘（plan / commit / DEV_LOG）的会话只回一行提醒，别再抄一遍文件内容。
 """
 import json
 import sqlite3
@@ -110,10 +112,15 @@ def main() -> None:
 
     msg = (
         f"【上下文 {tokens/10000:.1f} 万 token，窗口 {tokens/CTX_WINDOW*100:.0f}%】"
-        "现在按 handoff skill 生成一份交接摘要：读 "
-        "Code_Projects/.cursor/skills/handoff/SKILL.md 并照它执行，"
-        "写盘 + 复制到剪贴板 + 在回复里贴出文件路径。"
-        "手上如果还有没做完的活，先把进度写进摘要的「进行中」一节，不用停下来等我。"
+        "该换会话了。先判断要不要写交接摘要：\n"
+        "本会话的关键产出如果已经全部落在磁盘上（plan 文件 / 已推送的 commit / "
+        "DEV_LOG 条目 / 笔记），新窗口读那个文件就能接着干——那就只回一行提醒，"
+        "带上那个文件路径或 commit hash，不写摘要、不写盘、不 pbcopy。\n"
+        "只有存在没落盘的东西（花了 token 才实测出来的数字、被证伪的假设、API 走不通、"
+        "未提交的脏改动、任务做到一半且中间状态只在对话里），才读 "
+        "Code_Projects/.cursor/skills/handoff/SKILL.md 按它执行"
+        "（写盘 + 复制剪贴板 + 贴出路径）。\n"
+        "手上如果还有没做完的活，先把活做完，不用停下来等我。"
     )
     json.dump({"followup_message": msg}, sys.stdout, ensure_ascii=False)
 
