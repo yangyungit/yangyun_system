@@ -42,9 +42,13 @@ PROJECTS = Path.home() / ".cursor/projects"
 CTX_WINDOW = 300_000  # contextUsagePercent 的分母，pct * 3000 = token 数
 TZ = timezone(timedelta(hours=8))
 
-# 上下文超过这个数之后的每一轮，都在为前面一大段历史重复付费。
-# 报告里把这部分单独算出来，用来回答「早点新开会话能省多少」。
+# 上下文超过这个数之后的每一轮，都在为前面一大段历史重复付费
 LATE_CTX = 150_000
+
+# 反事实测算：假设上下文一到 SPLIT_AT 就新开会话、带 HANDOFF 大小的交接摘要过去，
+# 同样的活儿要花多少。用来回答「早点新开会话到底能省多少」。
+SPLIT_AT = 100_000
+HANDOFF = 15_000
 
 # 工具返回结果没进聊天记录，按这个常数占位。只影响 context 增长的形状，
 # 整体刻度由真实终值校准掉，所以不用调准。
@@ -203,15 +207,23 @@ def score_chat(msgs: list[dict], ctx_final: int) -> dict:
     # 真实终值 / 估算终值 = 刻度。终值缺失时退回纯字符估算。
     scale = (ctx_final / total) if (total and ctx_final) else 0.0
 
-    est_input = est_late = late_calls = 0
+    est_input = est_late = late_calls = est_split = 0
     hours: dict[str, list[int]] = {}
     api_calls = 0
+    base = seg_start = 0  # 反事实里当前这一段的起点
+    segments = 1
     for i, m in enumerate(msgs):
+        ctx_here = round(cum[i] * scale) if scale else cum[i] // 4
+        ctx_split = base + round((cum[i] - seg_start) * scale) if scale else ctx_here
+        if ctx_split > SPLIT_AT:
+            base, seg_start = HANDOFF, cum[i - 1] if i else 0
+            ctx_split = base + round((cum[i] - seg_start) * scale)
+            segments += 1
         if m["role"] != "assistant":
             continue
         api_calls += 1
-        ctx_here = round(cum[i] * scale) if scale else cum[i] // 4
         est_input += ctx_here
+        est_split += ctx_split
         if ctx_here > LATE_CTX:
             est_late += ctx_here
             late_calls += 1
@@ -230,6 +242,8 @@ def score_chat(msgs: list[dict], ctx_final: int) -> dict:
         "est_output": est_output,
         "est_late": est_late,
         "late_calls": late_calls,
+        "est_split": est_split,
+        "segments": segments,
         "hours": hours,
         "scale_ok": bool(scale),
     }
@@ -246,6 +260,7 @@ def init_db(con: sqlite3.Connection) -> None:
             ctx_final_tokens integer,
             est_input_tokens integer, est_output_tokens integer,
             est_late_tokens integer, late_calls integer,
+            est_split_tokens integer, split_segments integer,
             files_changed integer, lines_added integer, lines_removed integer,
             first_query text,
             compacted integer,
@@ -300,13 +315,15 @@ def main() -> None:
         )
 
         con.execute(
-            "insert or replace into chats values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "insert or replace into chats values "
+            "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 cid, h["title"], h["subtitle"], h["repo"],
                 start.isoformat(timespec="minutes"), end.isoformat(timespec="minutes"),
                 s["api_calls"], s["user_turns"], s["tool_calls"],
                 h["ctx_final"], s["est_input"], s["est_output"],
                 s["est_late"], s["late_calls"],
+                s["est_split"], s["segments"],
                 h["files_changed"], h["lines_added"], h["lines_removed"],
                 first_q[:800], compacted,
                 datetime.now(TZ).isoformat(timespec="seconds"),

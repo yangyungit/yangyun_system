@@ -109,6 +109,7 @@ def chat_meta(con: sqlite3.Connection, ids: list[str]) -> dict:
     rows = con.execute(
         f"""select chat_id, title, repo, api_calls, tool_calls, ctx_final_tokens,
                    compacted, first_query, est_late_tokens, late_calls,
+                   est_split_tokens, est_input_tokens,
                    lines_added, lines_removed, files_changed
             from chats where chat_id in ({marks})""",
         ids,
@@ -116,6 +117,7 @@ def chat_meta(con: sqlite3.Connection, ids: list[str]) -> dict:
     keys = (
         "title", "repo", "api_calls", "tool_calls",
         "ctx_final", "compacted", "first_query", "est_late", "late_calls",
+        "est_split", "est_input",
         "lines_added", "lines_removed", "files_changed",
     )
     return {r[0]: dict(zip(keys, r[1:])) for r in rows}
@@ -274,15 +276,29 @@ def build_report(con: sqlite3.Connection, day: str, until_hour: int | None) -> l
             f"　{len(h['chats'])} 个会话并行　占 {share:.0f}%"
         )
 
-    # 上下文堆高之后的轮次：同样的活儿，早点新开会话就不用为这段历史反复付费
-    late = sum(metas[c].get("est_late") or 0 for c in cur["by_chat"] if c in metas)
-    if late:
-        late_calls = sum(metas[c].get("late_calls") or 0 for c in cur["by_chat"] if c in metas)
+    # 同样的活儿，如果上下文一到 10 万就带交接摘要新开会话，要花多少。
+    # est_split 是整个会话全程的，跨午夜时得按当天归属到的比例缩放，
+    # 否则跟表头那个当天总额不是一个口径。
+    inp = split = 0
+    for c, tok in cur["by_chat"].items():
+        m = metas.get(c)
+        whole = (m or {}).get("est_input") or 0
+        if not whole:
+            continue
+        share = tok / whole
+        inp += tok
+        split += (m.get("est_split") or 0) * share
+    if inp and split < inp:
+        late_calls = sum(
+            metas[c].get("late_calls") or 0 for c in cur["by_chat"] if c in metas
+        )
         lines += [
             "",
-            f"**长会话的代价**：${late/1e6*rate:.1f}（{late/cur['total']*100:.0f}%）"
-            f"花在上下文超过 15 万之后的 {late_calls} 次调用上。"
-            f"这些轮次每次都在重发前面积累的全部历史——中途新开会话能砍掉大部分。",
+            f"**长会话的代价**：同样的活儿，上下文一到 10 万就带交接摘要新开会话，"
+            f"只要 ${split/1e6*rate:.0f}——**省 ${(inp-split)/1e6*rate:.0f}"
+            f"（{(1-split/inp)*100:.0f}%）**。"
+            f"今天有 {late_calls} 次回复是在上下文超过 15 万时发出的，"
+            f"每一次都把前面积累的全部历史重发了一遍。",
         ]
 
     if cats:

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.yangyun.ctx-watch</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/zhanghao/yangyun/Code_Projects/system/venv/bin/python</string>
+        <string>/Users/zhanghao/yangyun/Code_Projects/system/scripts/ctx_watch.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/zhanghao/yangyun/Code_Projects</string>
+    <key>StartInterval</key>
+    <integer>300</integer>
+    <key>StandardOutPath</key>
+    <string>/Users/zhanghao/yangyun/Code_Projects/system/scripts/ctx_watch.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/zhanghao/yangyun/Code_Projects/system/scripts/ctx_watch.log</string>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>
