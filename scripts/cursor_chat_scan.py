@@ -42,12 +42,23 @@ PROJECTS = Path.home() / ".cursor/projects"
 CTX_WINDOW = 300_000  # contextUsagePercent 的分母，pct * 3000 = token 数
 TZ = timezone(timedelta(hours=8))
 
+# 每轮必付的地板：system prompt + 工具定义 + rules + skills + subagent 定义。
+# 一句话没说就已经占掉这么多，新开会话也照付，省不掉。
+# 2026-09-15 从 Cursor 的 Context Usage 面板实测 41.8K（工具定义 22.7K 是大头，
+# rules 9.7K，skills 3.4K，system prompt 4K，subagent 定义 2K）；
+# 同日删掉两个重复的 rule 文件后降约 2.6K，取中间值 4 万。
+# 加这个之前估算曲线是从 0 开始爬的，等于假设第一轮免费，早期轮次严重低估，
+# 反事实拆会话也少算了「每段都要重付一次地板」，省下的比例算得偏高。
+CTX_FLOOR = 40_000
+
 # 上下文超过这个数之后的每一轮，都在为前面一大段历史重复付费
 LATE_CTX = 150_000
 
 # 反事实测算：假设上下文一到 SPLIT_AT 就新开会话、带 HANDOFF 大小的交接摘要过去，
 # 同样的活儿要花多少。用来回答「早点新开会话到底能省多少」。
-SPLIT_AT = 100_000
+# SPLIT_AT 跟 ctx_handoff_hook.py 的第一档对齐（都是含地板的真实 context 口径），
+# 所以这个反事实测的就是「一直按 hook 的策略办能省多少」，跑几天可以拿实际账单验。
+SPLIT_AT = 150_000
 HANDOFF = 15_000
 
 # 工具返回结果没进聊天记录，按这个常数占位。只影响 context 增长的形状，
@@ -204,19 +215,21 @@ def score_chat(msgs: list[dict], ctx_final: int) -> dict:
         total += r
         cum.append(total)
 
-    # 真实终值 / 估算终值 = 刻度。终值缺失时退回纯字符估算。
-    scale = (ctx_final / total) if (total and ctx_final) else 0.0
+    # 终值里扣掉地板才是对话本身，剩下的按字符比例摊回去，终点仍对齐真实值。
+    convo = max(ctx_final - CTX_FLOOR, 0)
+    scale = (convo / total) if (total and convo) else 0.0
 
     est_input = est_late = late_calls = est_split = 0
     hours: dict[str, list[int]] = {}
     api_calls = 0
-    base = seg_start = 0  # 反事实里当前这一段的起点
+    base, seg_start = CTX_FLOOR, 0  # 反事实里当前这一段的起点
     segments = 1
     for i, m in enumerate(msgs):
-        ctx_here = round(cum[i] * scale) if scale else cum[i] // 4
+        ctx_here = CTX_FLOOR + (round(cum[i] * scale) if scale else cum[i] // 4)
         ctx_split = base + round((cum[i] - seg_start) * scale) if scale else ctx_here
         if ctx_split > SPLIT_AT:
-            base, seg_start = HANDOFF, cum[i - 1] if i else 0
+            # 新开一段：地板重付一次，再加上带过去的交接摘要
+            base, seg_start = CTX_FLOOR + HANDOFF, cum[i - 1] if i else 0
             ctx_split = base + round((cum[i] - seg_start) * scale)
             segments += 1
         if m["role"] != "assistant":
