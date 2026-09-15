@@ -4,6 +4,7 @@ __pycache__/
 .DS_Store
 *.json
 data/*.db
+token_watch.db
 data/channel_ranking/
 data/yt_research/
 scripts/*.log
