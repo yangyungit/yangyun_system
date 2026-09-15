@@ -6,8 +6,9 @@
     python3 token_report.py --today            # 今天到现在（下午那次）
     python3 token_report.py --date 2026-09-14  # 指定某天
     python3 token_report.py --dry              # 只打印，不推 Discord
-    python3 token_report.py --calibrate 2026-09-14 88.0
-        # 用 Console 上那天的真实美元反推单价，存进库，以后都按这个算
+    python3 token_report.py --calibrate 2026-08-17 2026-09-15 1334.72
+        # 用 Console 上这段时间的真实美元反推单价，存进库，以后都按这个算。
+        # 区间越长越稳，建议直接用 Cost 页「近 30 天」那个总数。
 
 单价怎么来的，按可靠性从高到低：
 1. 根 .env 里有 ANTHROPIC_ADMIN_KEY —— 直接问 cost API 要那天的真实美元，
@@ -335,15 +336,22 @@ def push(lines: list[str]) -> str:
     return "已推送 Discord"
 
 
-def calibrate(con: sqlite3.Connection, day: str, amount: float) -> None:
-    tok = day_tokens(con, day, None)["total"]
+def calibrate(con: sqlite3.Connection, start: str, end: str, amount: float) -> None:
+    """拿 Console 上一段时间的真实美元反推单价。区间越长越稳，建议用 30 天那个数。"""
+    tok, = con.execute(
+        "select sum(est_input_tokens) from chat_hours where hour >= ? and hour <= ?",
+        (start, f"{end} 24"),
+    ).fetchone()
     if not tok:
-        print(f"{day} 没有会话记录，先跑 cursor_chat_scan.py")
+        print(f"{start} ~ {end} 没有会话记录，先跑 cursor_chat_scan.py 把天数扫够")
         return
     rate = amount / (tok / 1e6)
     con.execute("insert or replace into config values ('rate', ?)", (f"{rate:.4f}",))
     con.commit()
-    print(f"{day} 估算 {tok/1e6:.1f}M token，真实 ${amount:.2f} → 单价 ${rate:.2f}/百万，已存库")
+    print(
+        f"{start} ~ {end} 估算 {tok/1e6:.0f}M token，真实 ${amount:.2f}"
+        f" → 单价 ${rate:.2f}/百万，已存库"
+    )
 
 
 def main() -> None:
@@ -352,7 +360,7 @@ def main() -> None:
 
     if "--calibrate" in sys.argv:
         i = sys.argv.index("--calibrate")
-        calibrate(con, sys.argv[i + 1], float(sys.argv[i + 2]))
+        calibrate(con, sys.argv[i + 1], sys.argv[i + 2], float(sys.argv[i + 3]))
         con.close()
         return
 
