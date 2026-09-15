@@ -17,6 +17,10 @@ composerHeaders 里（contextUsagePercent * 3000，窗口 30 万），
 这时候带一段交接摘要新开会话，每轮成本能立刻掉一到两个数量级。
 
 同一个会话同一档只提醒一次，记在 token_watch.db 的 ctx_alerts 表里，不会刷屏。
+
+和 ctx_handoff_hook.py 的分工：那个挂在 Cursor 的 stop 事件上，过档时让会话自己写
+交接摘要，是主力；本脚本降级成兜底，只在 22 万还没人管的时候推一条。
+两边共用 ctx_alerts 表，hook 写的档位带 auto- 前缀，不会互相顶掉。
 """
 import json
 import sqlite3
@@ -43,11 +47,11 @@ ACTIVE_WITHIN = timedelta(minutes=12)
 # 新开会话时带过去的交接摘要大小，用来算「新开之后每轮多少钱」
 HANDOFF = 15_000
 
-# (阈值 token, 档位名, 话术)
+# 只剩一档兜底。15 万以上的交接由 ctx_handoff_hook.py 在会话里直接生成摘要，
+# 不用 Discord 催——催了也换不了会话，真正缺的是摘要。
+# 留 22 万这档是防 hook 没生效（Cursor 没开 / hooks.json 没加载）时还有个信号。
 TIERS = [
-    (220_000, "满", "窗口快满了，再聊下去会被自动压缩，压缩本身也要钱"),
-    (150_000, "高", "这是花钱最凶的区间，建议现在就交接"),
-    (100_000, "中", "开始明显变贵了，手上这段做完就换个会话"),
+    (220_000, "满", "窗口快满了，检查一下 handoff 摘要是不是没自动生成"),
 ]
 
 
